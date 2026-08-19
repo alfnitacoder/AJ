@@ -3,6 +3,10 @@
 
 extern volatile uint32_t pit_ticks;
 
+/* Runtime switch for the JSON debug event stream (kernel init clears it
+ * once boot completes so the console stays clean). */
+int agent_dbg_enabled = 1;
+
 static void append_u32(char *b, int *i, int cap, uint32_t v) {
   char t[12];
   int k = 0;
@@ -26,6 +30,8 @@ void agent_dbg_evt(const char *hypothesisId, const char *location,
   const int cap = (int)sizeof(b);
   const char *s;
   uint32_t eflags;
+  if (!agent_dbg_enabled)
+    return;
   __asm__ volatile("pushf; pop %0" : "=r"(eflags) : : "memory");
   __asm__ volatile("cli" ::: "memory");
 #define W(str)                                                               \

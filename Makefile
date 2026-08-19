@@ -386,7 +386,13 @@ run:
 	$(MAKE) $(OS_IMG) $(DATA_IMG)
 	cp $(OS_IMG) $(RUN_OS_IMG)
 	@echo "Tip: resize the QEMU window to enlarge text, or View → Zoom In (⌘+)."
-	@echo "Shell/editor also mirror on this Terminal via -serial stdio."
+	$(QEMU_RUN) -m 512M -vga std $(QEMU_DISPLAY) -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+
+# Same as run, but also mirrors the console to this Terminal via -serial stdio.
+run-mirror:
+	$(MAKE) force-clean-standard
+	$(MAKE) $(OS_IMG) $(DATA_IMG)
+	cp $(OS_IMG) $(RUN_OS_IMG)
 	$(QEMU_RUN) -m 512M -vga std $(QEMU_DISPLAY) -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial stdio
 
 # Build serial-console image only (no QEMU). Use if run-console segfaults; then run QEMU manually.

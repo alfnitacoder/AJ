@@ -243,6 +243,59 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
                 else: set_fat16_entry(fat, cluster, cluster + 1)
         return first_cluster, size
 
+    def alloc_dir_cluster(parent_cluster: int) -> int:
+        """Allocate a cluster holding an empty directory ('.' and '..')."""
+        nonlocal next_cluster
+        cluster = next_cluster
+        next_cluster += 1
+        if cluster >= actual_clusters + 2:
+            raise RuntimeError("Disk full allocating directory!")
+        if fat_type == 12: set_fat12_entry(fat, cluster, 0xFFF)
+        else: set_fat16_entry(fat, cluster, 0xFFFF)
+        lba = lba_of_cluster(cluster, data_lba, sectors_per_cluster)
+        sec = bytearray(sectors_per_cluster * SECTOR_SIZE)
+        dot = bytearray(32)
+        dot[0:11] = b".          "
+        dot[11] = 0x10
+        struct.pack_into("<H", dot, 26, cluster)
+        dotdot = bytearray(32)
+        dotdot[0:11] = b"..         "
+        dotdot[11] = 0x10
+        struct.pack_into("<H", dotdot, 26, parent_cluster)
+        sec[0:32] = dot
+        sec[32:64] = dotdot
+        img[lba * SECTOR_SIZE:lba * SECTOR_SIZE + len(sec)] = sec
+        return cluster
+
+    def dir_entry_83(name83: bytes, attr: int, cluster: int) -> bytes:
+        ent = bytearray(32)
+        ent[0:11] = name83
+        ent[11] = attr
+        struct.pack_into("<H", ent, 26, cluster)
+        return bytes(ent)
+
+    def add_system_dirs() -> None:
+        """Linux-style system directories baked into every image."""
+        etc_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"ETC        ", 0x10, etc_c))
+        var_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"VAR        ", 0x10, var_c))
+        log_c = alloc_dir_cluster(var_c)
+        # 'log' entry goes inside var's directory cluster, after . and ..
+        var_lba = lba_of_cluster(var_c, data_lba, sectors_per_cluster)
+        off = var_lba * SECTOR_SIZE + 64
+        img[off:off + 32] = dir_entry_83(b"LOG        ", 0x10, log_c)
+        bin_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"BIN        ", 0x10, bin_c))
+        tmp_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"TMP        ", 0x10, tmp_c))
+
+    def add_root_entry_raw(entry: bytes) -> None:
+        nonlocal root_idx
+        if root_idx >= ROOT_ENTRIES: raise RuntimeError("root dir full")
+        root[root_idx * 32:(root_idx + 1) * 32] = entry
+        root_idx += 1
+
     def add_root_entry(name: str, attr: int, first_cluster: int, size: int) -> None:
         nonlocal root_idx
         name83 = to_83(name)
@@ -266,6 +319,8 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
     for f in files:
         first_cluster, size = alloc_file(f.data, f.name)
         add_root_entry(f.name, 0x20, first_cluster, size)
+
+    add_system_dirs()
 
     img[fat1_lba * SECTOR_SIZE:(fat1_lba + sectors_per_fat) * SECTOR_SIZE] = fat
     img[fat2_lba * SECTOR_SIZE:(fat2_lba + sectors_per_fat) * SECTOR_SIZE] = fat

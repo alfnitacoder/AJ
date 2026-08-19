@@ -8404,6 +8404,19 @@ void kernel_main()
       "[INIT] All initialization complete! About to show login prompt...\n");
   outb(0x3F8, 'L'); // Debug: Login prompt
 
+  /* Linux-style system directories; baked into new images by mkfat12.py and
+   * (re)created here for older images. fat12_mkdir is mkdir -p semantics. */
+  fat12_mkdir("etc");
+  fat12_mkdir("var/log");
+  fat12_mkdir("bin");
+  fat12_mkdir("tmp");
+
+  /* Quiet the JSON debug event stream now that boot is done. */
+  {
+    extern int agent_dbg_enabled;
+    agent_dbg_enabled = 0;
+  }
+
   /* Runtime logs (SSH sessions, network activity, services) go to
    * /var/log/ajos instead of the console. Boot messages above stay on the
    * console. Use "syslog console" to mirror logs back, "syslog stop" to
