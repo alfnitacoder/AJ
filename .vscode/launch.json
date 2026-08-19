@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug AJOS (attach to QEMU)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/kernel.elf",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/opt/homebrew/bin/gdb",
+      "miDebuggerServerAddress": "localhost:1234",
+      "setupCommands": [
+        { "text": "set architecture i386" },
+        { "text": "add-symbol-file ${workspaceFolder}/build/kernel.elf 0x100000" }
+      ],
+      "preLaunchTask": ""
+    }
+  ]
+}

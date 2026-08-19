@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "AJOS Kernel (x86)",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include"
+            ],
+            "defines": [],
+            "compilerPath": "/opt/homebrew/bin/x86_64-elf-gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x86",
+            "compilerArgs": [
+                "-m32",
+                "-march=i386",
+                "-mno-sse",
+                "-mno-sse2",
+                "-nostdinc",
+                "-fno-builtin"
+            ]
+        }
+    ],
+    "version": 4
+}

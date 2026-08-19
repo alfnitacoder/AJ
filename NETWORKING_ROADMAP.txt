@@ -1,0 +1,80 @@
+AJOS Networking Roadmap (checklist)
+==================================
+Last updated: 2026-01-19
+
+Legend:
+  [x] implemented
+  [ ] not yet
+  [~] partially / in progress
+
+0) Current baseline
+-------------------
+[x] 32-bit protected mode kernel
+[x] IDT + exceptions + IRQs (PIC)
+[x] PIT timer
+[x] Keyboard IRQ + input layer
+[x] Shell + commands
+[x] FAT12 read (ls/cat) + cp to RAM + run (ring0)
+[x] Syscalls via int 0x80 (write/ticks/sleep/getkey/exit)
+[x] Ring3 user-mode execution (run3) + TSS stack switch
+
+1) Memory + process foundation (needed before serious networking)
+---------------------------------------------------------------
+[x] Paging (enable CR0.PG) + basic page tables (identity map 0..16MB)
+[~] User/kernel page protection (supervisor vs user pages) (partial: only a small user window is marked user)
+[x] Safe user-pointer validation in syscalls (copyin/copyout) (basic range check for sys_write)
+[ ] Per-process user stack (separate per program)
+[ ] Per-process address space (separate page directory)
+[ ] Preemptive scheduler + context switch (PIT preemption)
+
+2) Hardware discovery + driver framework
+---------------------------------------
+[x] PCI scan + config space access (shell: `pci`)
+[ ] IRQ routing helpers (PIC now; later APIC if desired)
+[ ] Driver model (probe/init, IRQ registration, buffers)
+
+3) Networking hardware driver (choose one)
+-----------------------------------------
+[x] E1000 driver (recommended) (detected + MMIO mapped + MAC read + basic TX test + IRQ handler wired)
+[ ] RTL8139 driver (simpler/older alternative)
+[x] RX/TX rings (TX works; RX works via IRQ polling; DHCP OFFER received)
+[x] Packet buffer allocator (mbuf/skb style)
+    [x] Basic struct pbuf (fixed size)
+    [x] Alloc/Free/Chain logic (using kmalloc)
+
+4) Minimal network stack (to first ping)
+---------------------------------------
+[x] Ethernet layer (RX path feeding stack)
+[x] ARP
+[x] IPv4
+[x] ICMP echo (ping) (verified: `ping 10.0.2.2` reply received)
+
+5) UDP + configuration
+----------------------
+[x] UDP
+[x] Static IP config (ifconfig-like)
+[x] DHCP client (DISCOVER/OFFER/REQUEST/ACK working; shell prints lease summary)
+[x] Loopback interface (127.0.0.1)
+[x] DNS client (verified: `dns google.com` resolved)
+
+6) TCP (bigger step)
+--------------------
+[~] TCP (connect/send/recv/close) (Active Open complete)
+    [x] Passive Open (LISTEN, SYN_RCVD, ESTABLISHED)
+    [x] Active Open (SYN_SENT state)
+    [ ] Sliding Window & Flow Control
+[~] Retransmission & Timeouts (SYN/SYN-ACK/FIN + one small data segment PIT-driven retransmit)
+    [ ] User-space Socket API
+[ ] Minimal HTTP client / wget
+
+7) Immediate next fixes (current focus)
+--------------------------------------
+[x] Fix E1000 RX: packets received in QEMU user-net (DHCP OFFER seen)
+[x] Add `e1000reinit` command (reset + reinit TX/RX for faster testing)
+[x] Complete DHCP: REQUEST -> ACK and apply config to interface
+[~] Reduce TCP debug output + make `http_get` print response status line (optional polish)
+[x] End-to-end test: `dhcp` then `ping 10.0.2.2` (QEMU gateway)
+[x] Basic routing via gateway (netmask/gateway stored; off-subnet routed via gateway)
+[x] End-to-end test: `ping 8.8.8.8`
+[x] End-to-end test: `dns example.com`
+[x] Narrow E1000 IMS interrupt mask to RX bits (reduce IRQ noise)

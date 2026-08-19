@@ -1,0 +1,191 @@
+AJOS Development Roadmap v1.0.1
+================================
+Last updated: 2026-01-19
+
+Legend:
+  [x] implemented
+  [ ] not yet
+  [~] partially / in progress
+
+================================================================================
+1) Process Management & Multitasking (HIGH PRIORITY - Foundation)
+================================================================================
+[~] Preemptive scheduler (PIT-driven context switches) [BASIC FRAMEWORK: scheduler_tick, round-robin selection, but no full context switching yet]
+[x] Process Control Block (PCB) structure
+[~] Process creation/termination syscalls [BASIC: GETPID, GETPPID implemented; fork/exec pending]
+[ ] Per-process address spaces (separate page directories)
+[ ] Per-process user stacks (separate per program)
+[x] Process list command (`ps`) [ENHANCED: shows PPID, CPU time]
+[x] Process termination command (`kill <pid>`)
+[x] Background jobs (`&` syntax) [BASIC: marks processes as background, but still runs synchronously until full multitasking]
+[x] Job control commands (`jobs`, `fg`, `bg`) [BASIC: `jobs` and `wait` implemented, `fg`/`bg` pending full multitasking]
+[x] Process state management (RUNNING, SLEEPING, ZOMBIE, etc.)
+
+Why: Enables running multiple programs simultaneously, background tasks, and
+     proper isolation between programs. Foundation for pipes, signals, and IPC.
+
+================================================================================
+2) TCP Improvements (HIGH PRIORITY - Complete Networking Stack)
+================================================================================
+[ ] Sliding Window & Flow Control
+[~] User-space Socket API (syscalls: socket, bind, listen, accept, connect,
+     send, recv, close) [BASIC: All syscalls implemented, but accept needs improvement]
+[x] Full HTTP response parsing (not just status line) [BASIC: Parses status code, headers, finds body]
+[x] HTTP response body handling [BASIC: Extracts body after headers]
+[x] `wget <url>` command - download files via HTTP [BASIC: Downloads and saves to file]
+[x] `httpd [port]` command - simple HTTP server [SERVICE: `service httpd start|stop|reload`]
+[ ] HTTP POST support
+[ ] HTTPS/TLS support (optional, advanced)
+
+Why: Completes the networking stack and enables real applications.
+
+================================================================================
+3) Filesystem Enhancements (HIGH PRIORITY - Practical Features)
+================================================================================
+[ ] File permissions/attributes (read-only flag)
+[x] File timestamps (creation/modification time)
+[ ] `chmod <mode> <file>` command - change permissions
+[x] `touch <file>` command - update timestamp or create empty file
+[x] `grep <pattern> <file>` command - search text in files
+[ ] File ownership (user/group)
+[ ] Symbolic links support
+
+Why: Makes the filesystem more practical and Unix-like.
+
+================================================================================
+4) System Utilities (MEDIUM PRIORITY - Usability)
+================================================================================
+[x] `date` command - show/set system date/time
+[x] `whoami` / `id` command - show current user/process info [BASIC: shows "root" for now]
+[ ] `env` command - show environment variables
+[ ] `export VAR=value` command - set environment variables
+[ ] `echo $VAR` command - expand environment variables
+[x] `uname` command - show system information [SUPPORTS: -a, -s, -r, -m flags]
+[x] `hostname` command - show/set hostname [BASIC: stores hostname in memory]
+
+================================================================================
+5) Networking Utilities (MEDIUM PRIORITY - Network Tools)
+================================================================================
+[ ] `telnet <ip> <port>` command - interactive TCP client
+[ ] `netstat` command - show active connections/listeners
+[ ] `route` command - show/manage routing table
+[ ] `traceroute <ip>` command - trace network path
+[ ] `nslookup <hostname>` command - DNS lookup tool
+[x] `ifconfig` improvements [ENHANCED: shows all interfaces, MAC addresses, supports up to 5 ethernet devices, interface management (up/down/default)]
+[ ] Network interface statistics (packets sent/received, errors)
+
+================================================================================
+6) Text Processing (MEDIUM PRIORITY - File Operations)
+================================================================================
+[x] `grep <pattern> <file>` command - search text in files
+[x] `head <file>` command - show first N lines [SUPPORTS: -n flag for line count, default 10]
+[x] `tail <file>` command - show last N lines [SUPPORTS: -n flag for line count, default 10]
+[x] `wc <file>` command - word/line/character count [SHOWS: lines, words, characters]
+[ ] `sort` command - sort lines
+[ ] `uniq` command - remove duplicate lines
+[ ] `cut` command - extract columns from text
+[ ] `sed` command - stream editor (basic version)
+
+================================================================================
+7) File Operations (MEDIUM PRIORITY - File Management)
+================================================================================
+[ ] `chmod <mode> <file>` command - change permissions
+[ ] `touch <file>` command - create/update timestamp
+[ ] `ln <src> <dst>` command - create hard links
+[ ] `file <name>` command - show file type
+[ ] `stat <file>` command - show detailed file information
+[ ] `chown` command - change file ownership (if user system exists)
+[ ] File compression (gzip-like, optional)
+
+================================================================================
+8) Advanced Features (LOWER PRIORITY - Nice-to-Have)
+================================================================================
+[x] Inter-process communication (Partial: redirection `>` and `>>`)
+[ ] Signal handling (SIGTERM, SIGINT, SIGKILL, SIGUSR1, SIGUSR2)
+[ ] Scripting support (simple shell scripts: `#!/bin/sh`)
+[ ] Job control (`&`, `fg`, `bg`, `jobs`)
+[ ] Command aliases (`alias ll='ls -l'`)
+[ ] Command history improvements (persistent across reboots)
+[ ] Tab completion for commands and filenames
+[ ] Environment variable expansion in commands
+[ ] Wildcard expansion (`*`, `?`, `[...]`)
+
+================================================================================
+9) Hardware Drivers (LOWER PRIORITY - Hardware Support)
+================================================================================
+[ ] ATA/IDE disk driver (beyond floppy)
+[ ] USB support (if QEMU exposes it)
+[ ] Sound card (PC speaker beeps, basic audio)
+[ ] VGA graphics modes (beyond text mode)
+[ ] PS/2 mouse driver
+[ ] Serial port driver improvements
+[x] Real-time clock (RTC) driver [STABLE: Used for date and file timestamps]
+[ ] APIC support (beyond PIC)
+
+================================================================================
+10) Development Tools (LOWER PRIORITY - Developer Features)
+================================================================================
+[ ] Simple assembler/compiler
+[ ] Debugger (`gdb`-like, basic breakpoints)
+[ ] Profiler (function call timing)
+[ ] System call tracer (`strace`-like)
+[ ] Memory profiler (heap usage tracking)
+[ ] Kernel module loader (optional, advanced)
+[ ] Build system improvements
+[ ] Documentation generator
+
+================================================================================
+Current Status Summary
+================================================================================
+
+Already Implemented:
+- 32-bit protected mode kernel
+- IDT + exceptions + IRQs (PIC)
+- PIT timer
+- Keyboard IRQ + input layer
+- Shell + extensive commands (including redirection `>` and `>>`)
+- FAT12 read/write with full directory support (mkdir, rm, mv, find)
+- Syscalls via int 0x80 (write, ticks, sleep, getkey, exit)
+- Ring3 user-mode execution (run3) + TSS stack switch
+- Paging (basic identity map)
+- Full networking stack (Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS)
+- E1000 network driver
+- RTC (Real-Time Clock) driver
+- Text editor
+- PCI scan
+- Heap allocator
+
+Partially Implemented:
+- User/kernel page protection (partial: only small user window marked user)
+- TCP (basic connect/send/recv, but missing sliding window)
+- Retransmission (SYN/FIN/small data segments, but not full window)
+
+================================================================================
+Recommended Implementation Order
+================================================================================
+
+Phase 1 (Foundation):
+  1. Process Management & Multitasking (#1)
+  2. TCP Improvements (#2) - sliding window, socket API
+  3. Filesystem Enhancements (#3) - permissions, timestamps
+
+Phase 2 (Usability):
+  4. System Utilities (#4)
+  5. Networking Utilities (#5)
+  6. Text Processing (#6)
+
+Phase 3 (Advanced):
+  7. File Operations (#7)
+  8. Advanced Features (#8) - pipes, signals, scripting
+  9. Hardware Drivers (#9)
+  10. Development Tools (#10)
+
+================================================================================
+Notes
+================================================================================
+
+- Focus on Phase 1 first to build a solid foundation
+- Process management unlocks many other features (pipes, signals, IPC)
+- TCP improvements complete the networking stack
+- Filesystem enhancements make the OS more practical
+- Each phase builds on previous phases

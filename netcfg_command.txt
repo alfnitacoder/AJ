@@ -1,0 +1,39 @@
+// Network configuration shell command
+// Add this to kernel.c after cmd_dns
+
+static void cmd_netcfg(const char *args) {
+  const char *filename = skip_spaces(args);
+  if (!*filename) {
+    filename = "NETWORK.CFG";
+  }
+  
+  uint8_t *buf = NULL;
+  uint32_t size = 0;
+  
+  if (!fat12_read_file_to_ram(filename, &buf, &size)) {
+    log_writestring("[NetCfg] File not found: ");
+    log_writestring(filename);
+    log_putchar('\n');
+    return;
+  }
+  
+  log_writestring("[NetCfg] Loading from ");
+  log_writestring(filename);
+  log_putchar('\n');
+  
+  int has_static_ip = netcfg_load_from_buffer((const char *)buf, size);
+  kfree(buf);
+  
+  if (!has_static_ip) {
+    log_writestring("[NetCfg] No static IP, use DHCP\n");
+  }
+}
+
+// Register in shell_execute:
+// if (cmd_clean_len == 6 && kstrcmp_n(cmd_clean, "netcfg", 6) == 0) {
+//   cmd_netcfg(rest);
+//   return;
+// }
+
+// Add to help:
+// log_writestring("  netcfg [file]   Load network config (default: NETWORK.CFG)\n");
