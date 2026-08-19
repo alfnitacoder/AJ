@@ -178,12 +178,16 @@ static void draw_prompt_glyph(int x, int y, int s, uint32_t fg) {
 }
 
 static void draw_folder_glyph(int x, int y, int s, uint32_t fg) {
+  /* Two-tone folder: darker back flap, lighter front, gloss line. */
   int pad = s / 5;
   int fw = s - pad * 2;
   int fh = s / 2;
   int fy = y + s / 2 - fh / 3;
   video_fill_round_rect(x + pad, fy, fw / 2, fh / 3, 3, fg);
   video_fill_round_rect(x + pad, fy + fh / 5, fw, fh, 5, fg);
+  /* Gloss: light band across the front top third. */
+  video_blend_round_rect(x + pad + 2, fy + fh / 5 + 2, fw - 4, fh / 3, 4,
+                         COL_TEXT_INV, 55);
 }
 
 static void draw_info_glyph(int x, int y, int s, uint32_t fg) {
@@ -233,7 +237,12 @@ static void draw_left_dock(int hover) {
     if (active)
       video_fill_round_rect(2, y + 8, 4, h - 16, 2, COL_ORANGE);
 
+    /* Icon body: base color with vertical light-to-dark shading and a gloss
+     * cap, like modern app tiles. */
     video_fill_round_rect(x, y, w, h, 12, dock_items[i].color);
+    video_blend_round_rect(x, y, w, h / 2, 12, COL_TEXT_INV, 42);
+    video_blend_round_rect(x, y + h / 2, w, h / 2, 12, COL_BLACK, 28);
+    video_fill_round_rect(x + 6, y + h / 2 - 1, w - 12, 2, 1, COL_TEXT_INV);
     if (i == hover)
       video_draw_rect(x, y, w, h, COL_TEXT_INV);
 
@@ -271,10 +280,18 @@ static void draw_window_chrome(GuiWindow *win) {
   else
     video_draw_rect(ox, oy, win->w, win->h, COL_EDGE);
 
-  /* GNOME-style header bar */
+  /* GNOME-style header bar with soft vertical shading */
   video_fill_round_rect(ox + 1, oy + 1, win->w - 2, TITLE_H - 2, 10, COL_TITLE);
+  video_blend_round_rect(ox + 1, oy + 1, win->w - 2, (TITLE_H - 2) / 2, 10,
+                         COL_TEXT_INV, 50);
+  video_blend_rect(ox + 1, oy + TITLE_H / 2, win->w - 2, TITLE_H / 2 - 8,
+                   COL_BLACK, 14);
   video_fill_rect(ox + 1, oy + TITLE_H - 8, win->w - 2, 8, COL_TITLE);
-  video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 1, COL_EDGE);
+  /* Focused windows get an accent underline under the header */
+  if (win->focused)
+    video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 2, COL_ORANGE);
+  else
+    video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 1, COL_EDGE);
 
   int cy = oy + TITLE_H / 2;
   /* Window controls on the right (modern GNOME) */
@@ -388,7 +405,10 @@ static void files_draw(GuiWindow *win) {
     if (!tmp[0])
       continue;
     int ry = cy + r * row_h;
-    video_fill_round_rect(cx - 8, ry - 4, 22, 22, 6, COL_ORANGE);
+    /* Row icon: soft tile with gloss instead of a flat square. */
+    video_fill_round_rect(cx - 8, ry - 4, 22, 22, 6, COL_PANEL2);
+    video_blend_round_rect(cx - 8, ry - 4, 22, 11, 6, COL_TEXT_INV, 40);
+    draw_folder_glyph(cx - 10, ry - 6, 26, COL_ORANGE);
     video_draw_ui_clip(cx + 28, ry, tmp, COL_TEXT, win->x + win->w - 28);
   }
 }
@@ -464,6 +484,8 @@ static void term_draw(GuiWindow *win) {
   int py = win->y + win->h - 40;
   video_fill_round_rect(win->x + 16, py - 6, win->w - 32, 34, 10,
                         vid_rgb(60, 16, 48));
+  video_blend_round_rect(win->x + 16, py - 6, win->w - 32, 17, 10,
+                         COL_TEXT_INV, 18);
   video_draw_ui(cx, py, ">", COL_ORANGE);
   char prompt[80];
   size_t copy = term_line_len;
