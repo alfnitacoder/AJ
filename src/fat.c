@@ -5,6 +5,10 @@
 #include "debug_agent.h"
 #include "kernel.h"
 
+/* Per-call FAT trace logs (init geometry, write probes). Set to 1 to
+ * re-enable FAT-level debugging on the console. */
+#define FAT_TRACE_LOG 0
+
 // Forward declarations
 extern int parse_u32(const char *s, uint32_t *out);
 extern void mem_set(uint8_t *dst, uint8_t v, uint32_t n);
@@ -297,11 +301,13 @@ int fat12_init_ex(struct fat_ctx *ctx, uint8_t drive) {
   ctx->root_sectors =
       (uint16_t)((ctx->bpb.root_dir_entries * 32u + 511u) / 512u);
   ctx->data_lba = ctx->root_lba + (uint32_t)ctx->root_sectors;
+#if FAT_TRACE_LOG
   log_writestring("[FAT] root_lba=");
   log_write_u32(ctx->root_lba);
   log_writestring(" root_sectors=");
   log_write_u32((uint32_t)ctx->root_sectors);
   log_writestring("\n");
+#endif
 
   // Initialize cache
   ctx->use_cache = 1; // Enable sector-based cache
@@ -1145,11 +1151,13 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
                 (uint32_t)fat12_cwd_cluster, (uint32_t)size);
   // #endregion
 
+#if FAT_TRACE_LOG
   log_writestring("[FAT] write drive=");
   log_write_hex8((uint8_t)ctx->drive);
   log_writestring(" root_lba=");
   log_write_u32((uint32_t)ctx->root_lba);
   log_putchar('\n');
+#endif
 
   // Extract filename and parent path from full path
   const char *filename = fn;
@@ -1313,11 +1321,13 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
     agent_dbg_evt("F", "fat.c:fat12_write_file_ex", "attr",
                   (uint32_t)ent->attr, (uint32_t)ent->name[0]);
     // #endregion
+#if FAT_TRACE_LOG
     log_writestring("[FAT] ent attr before=");
     log_write_hex8(ent->attr);
     log_writestring(" name0=");
     log_write_hex8(ent->name[0]);
     log_putchar('\n');
+#endif
     kmemcpy(ent->name, name83, 11);
     // File entries must not keep stale attribute bits (e.g. volume-label
     // 0x08) from the previous occupant of this slot, or fat12_find_in_dir
@@ -1332,6 +1342,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
       dir_buf[ent_off + 11] = 0x00; // attr
     }
     // #endregion
+#if FAT_TRACE_LOG
     log_writestring("[FAT] sfn_post name0=");
     log_write_hex8(ent->name[0]);
     log_writestring(" attr=");
@@ -1339,6 +1350,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
     log_writestring(" slot=");
     log_write_u32(ent_slot_idx);
     log_putchar('\n');
+#endif
   } else {
     kfree(dir_buf);
     return 0;

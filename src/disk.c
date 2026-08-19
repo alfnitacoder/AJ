@@ -12,6 +12,9 @@
 // trampoline. Bootloader pre-loads 632 sectors (FAT/root). Model needs more.
 #ifndef AJOS_NO_BIOS_DISK
 #define AJOS_NO_BIOS_DISK 0
+/* Per-I/O trace logs (rd_probe, rd_hit_cache, wr_probe, cache_write, ...).
+ * Set to 1 to re-enable sector-level disk debugging on the console. */
+#define DISK_TRACE_LOG 0
 #endif
 
 #define DISK_CACHE_BASE ((uint8_t *)0x51000u)
@@ -315,6 +318,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
     return 0;
 
   // #region agent log
+#if DISK_TRACE_LOG
   static uint8_t disk_rd_probe_n;
   if (lba >= 550u && lba <= 560u && disk_rd_probe_n < 12u &&
       !ssh_shell_log_sink_active()) {
@@ -327,6 +331,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
     log_write_u32(lba);
     log_putchar('\n');
   }
+#endif
   // #endregion
 
   // When boot is floppy and we're reading from it, check the root
@@ -336,6 +341,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
     uint8_t *cache_ptr = DISK_CACHE_BASE + lba * SECTOR_SIZE;
     mem_copy(dst512, cache_ptr, SECTOR_SIZE);
     // #region agent log
+#if DISK_TRACE_LOG
     if (lba >= 550u && lba <= 580u && dst512[288] == 0x54u) {
       log_writestring("[DISK] rd_hit_rootrange lba=");
       log_write_u32(lba);
@@ -343,6 +349,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
       log_write_hex8(dst512[288]);
       log_putchar('\n');
     }
+#endif
     // #endregion
     return 1;
   }
@@ -352,6 +359,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
     uint8_t *cache_ptr = DISK_CACHE_BASE + lba * SECTOR_SIZE;
     mem_copy(dst512, cache_ptr, SECTOR_SIZE);
     // #region agent log
+#if DISK_TRACE_LOG
     if (lba >= 550u && lba <= 580u && dst512[288] == 0x54u) {
       log_writestring("[DISK] rd_hit_cache lba=");
       log_write_u32(lba);
@@ -359,6 +367,7 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
       log_write_hex8(dst512[288]);
       log_putchar('\n');
     }
+#endif
     // #endregion
 
     // Check if cached sector is all zeros (potential uninitialized cache)
@@ -407,6 +416,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
   int success = 0;
 
   // #region agent log
+#if DISK_TRACE_LOG
   if (lba >= 550u && lba <= 560u) {
     static uint8_t disk_wr_src_probe_n;
     if (disk_wr_src_probe_n < 6u) {
@@ -422,6 +432,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
       log_putchar('\n');
     }
   }
+#endif
   // #endregion
 
   if (ata_available && drive >= 0x80) {
@@ -431,6 +442,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
   }
 
   // #region agent log
+#if DISK_TRACE_LOG
   if (lba >= 550u && lba <= 560u) {
     static uint8_t disk_wr_probe_n;
     if (disk_wr_probe_n < 12u) {
@@ -460,6 +472,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
                     (uint32_t)lba, (uint32_t)(unsigned char)src512[0]);
     }
   }
+#endif
   // #endregion
 
   /* Floppy reads use DISK_CACHE_BASE (see disk_read_sector). If the BIOS write
@@ -470,6 +483,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
     mem_copy(cache_ptr, src512, SECTOR_SIZE);
 
     // #region agent log
+#if DISK_TRACE_LOG
     static uint8_t root_cache_sample_n;
     if (lba >= 550u && lba <= 560u && root_cache_sample_n < 20u) {
       root_cache_sample_n++;
@@ -499,6 +513,7 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
       log_write_hex8(cache_ptr[299]);
       log_putchar('\n');
     }
+#endif
     // #endregion
   }
   return success;
