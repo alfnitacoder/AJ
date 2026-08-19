@@ -20,7 +20,6 @@ void kfree(void *ptr);
 extern void log_writestring(const char *s);
 
 #define PANEL_H 32
-#define DOCK_W 68
 #define TITLE_H 40
 #define MAX_WINS 4
 #define TERM_OUT_CAP 8192
@@ -28,9 +27,10 @@ extern void log_writestring(const char *s);
 #define FILES_CAP 4096
 #define UI_CH (8 * video_ui_scale())
 #define DOCK_N 3
-#define DOCK_ICON 48
-#define DOCK_GAP 14
+#define DOCK_ICON 56
+#define DOCK_GAP 18
 #define DOCK_PAD 10
+#define DOCK_H (DOCK_ICON + 2 * DOCK_PAD + 8)
 
 typedef struct GuiWindow GuiWindow;
 struct GuiWindow {
@@ -123,12 +123,12 @@ static int wall_ready = 0;
 static void draw_wallpaper(void) {
   uint32_t sz = (uint32_t)video_width * (uint32_t)video_height * 4u;
   if (!wall_ready) {
-    /* Aubergine wash + soft orange glow (Ubuntu-ish) */
+    /* Light macOS-style sweep: soft blue to near-white, warm glow low */
     video_gradient_v(0, 0, video_width, video_height, COL_BG_TL, COL_BG_BR);
-    video_blend_round_rect(video_width / 3, video_height / 5, video_width / 2,
-                            video_height / 2, 120, COL_ORANGE, 28);
-    video_blend_round_rect(video_width / 8, video_height / 2, video_width / 3,
-                            video_height / 3, 100, COL_AUBERGINE, 40);
+    video_blend_round_rect(video_width / 4, video_height / 2, video_width / 2,
+                            video_height / 2, 160, COL_SURFACE, 38);
+    video_blend_round_rect(video_width / 3, video_height / 6, video_width / 3,
+                            video_height / 3, 120, vid_rgb(120, 170, 255), 26);
     wall_cache = video_wallpaper_slot(sz);
     if (wall_cache && video_back) {
       uint32_t *d = (uint32_t *)wall_cache;
@@ -152,21 +152,21 @@ static void draw_wallpaper(void) {
 }
 
 static void draw_top_panel(void) {
-  video_blend_rect(0, 0, video_width, PANEL_H, COL_MENUBAR, 235);
-  video_draw_ui(16, (PANEL_H - UI_CH) / 2, "Activities", COL_TEXT_INV);
+  video_blend_rect(0, 0, video_width, PANEL_H, COL_MENUBAR, 220);
+  video_fill_rect(0, PANEL_H - 1, video_width, 1, COL_EDGE);
+  video_draw_ui(16, (PANEL_H - UI_CH) / 2, "Activities", COL_TEXT);
   video_draw_ui(16 + video_ui_width("Activities") + 24, (PANEL_H - UI_CH) / 2,
                 "AJOS", COL_ORANGE);
 
   char clk[8];
   format_clock(clk, sizeof(clk));
   int cw = video_ui_width(clk);
-  video_draw_ui((video_width - cw) / 2, (PANEL_H - UI_CH) / 2, clk,
-                COL_TEXT_INV);
+  video_draw_ui((video_width - cw) / 2, (PANEL_H - UI_CH) / 2, clk, COL_TEXT);
 
-  /* Fake system tray dots */
+  /* System tray dots */
   int tx = video_width - 72;
-  video_fill_circle(tx, PANEL_H / 2, 3, COL_TEXT_INV);
-  video_fill_circle(tx + 16, PANEL_H / 2, 3, COL_TEXT_INV);
+  video_fill_circle(tx, PANEL_H / 2, 3, COL_TEXT_DIM);
+  video_fill_circle(tx + 16, PANEL_H / 2, 3, COL_TEXT_DIM);
   video_fill_circle(tx + 32, PANEL_H / 2, 3, COL_ORANGE);
 }
 
@@ -208,21 +208,35 @@ static DockItem dock_items[DOCK_N] = {
 };
 
 static void dock_item_colors(void) {
-  dock_items[0].color = vid_rgb(10, 22, 52);   /* Terminal: deep navy */
-  dock_items[1].color = vid_rgb(28, 108, 214); /* Files: bright blue */
-  dock_items[2].color = vid_rgb(58, 78, 148);  /* About: indigo */
+  dock_items[0].color = vid_rgb(38, 40, 46);   /* Terminal: near-black */
+  dock_items[1].color = vid_rgb(64, 156, 255); /* Files: folder blue */
+  dock_items[2].color = vid_rgb(232, 234, 240);/* About: light gray */
+}
+
+/* macOS-style bottom dock: icons in a row, centered. */
+static int dock_bar_geom(int *bx, int *by, int *bw, int *bh) {
+  *bw = DOCK_N * DOCK_ICON + (DOCK_N - 1) * DOCK_GAP + 2 * DOCK_PAD;
+  *bh = DOCK_H;
+  *bx = (video_width - *bw) / 2;
+  *by = video_height - *bh;
+  return 1;
 }
 
 static void dock_icon_geom(int kind, int *ox, int *oy, int *ow, int *oh) {
+  int bx, by, bw, bh;
+  dock_bar_geom(&bx, &by, &bw, &bh);
   *ow = DOCK_ICON;
   *oh = DOCK_ICON;
-  *ox = (DOCK_W - DOCK_ICON) / 2;
-  *oy = PANEL_H + DOCK_PAD + 8 + kind * (DOCK_ICON + DOCK_GAP);
+  *ox = bx + DOCK_PAD + kind * (DOCK_ICON + DOCK_GAP);
+  *oy = by + (bh - DOCK_ICON) / 2;
 }
 
 static void draw_left_dock(int hover) {
-  video_blend_rect(0, PANEL_H, DOCK_W, video_height - PANEL_H, COL_DOCK, 220);
-  video_fill_rect(DOCK_W - 1, PANEL_H, 1, video_height - PANEL_H, COL_EDGE);
+  int bx, by, bw, bh;
+  dock_bar_geom(&bx, &by, &bw, &bh);
+  /* Translucent light shelf with rounded top corners */
+  video_blend_round_rect(bx, by, bw, bh, 18, COL_DOCK, 205);
+  video_draw_rect(bx, by, bw, bh, COL_EDGE);
 
   for (int i = 0; i < DOCK_N; i++) {
     int x, y, w, h;
@@ -231,37 +245,37 @@ static void draw_left_dock(int hover) {
                  (dock_items[i].win_idx >= 0 &&
                   dock_items[i].win_idx < n_wins &&
                   wins[dock_items[i].win_idx].visible);
-    int lift = (i == hover) ? -3 : 0;
+    int lift = (i == hover) ? -5 : 0;
     y += lift;
 
-    if (active)
-      video_fill_round_rect(2, y + 8, 4, h - 16, 2, COL_ORANGE);
-
-    /* Icon body: base color with vertical light-to-dark shading and a gloss
-     * cap, like modern app tiles. */
-    video_fill_round_rect(x, y, w, h, 12, dock_items[i].color);
-    video_blend_round_rect(x, y, w, h / 2, 12, COL_TEXT_INV, 42);
-    video_blend_round_rect(x, y + h / 2, w, h / 2, 12, COL_BLACK, 28);
-    video_fill_round_rect(x + 6, y + h / 2 - 1, w - 12, 2, 1, COL_TEXT_INV);
-    if (i == hover)
-      video_draw_rect(x, y, w, h, COL_TEXT_INV);
+    /* Icon tile: flat squircle with a soft top sheen and hairline */
+    video_fill_round_rect(x, y, w, h, 14, dock_items[i].color);
+    video_blend_round_rect(x, y, w, h / 2 - 2, 14, COL_TEXT_INV, 26);
+    video_draw_rect(x, y, w, h, vid_rgb(255, 255, 255));
 
     if (i == 0)
       draw_prompt_glyph(x, y, w, COL_TEXT_INV);
     else if (i == 1)
-      draw_folder_glyph(x, y, w, COL_TEXT_INV);
+      draw_folder_glyph(x, y, w, vid_rgb(250, 208, 118));
     else
       draw_info_glyph(x, y, w, COL_ORANGE);
+
+    /* Running indicator: small dot under the icon (macOS) */
+    if (active)
+      video_fill_circle(x + w / 2, by + bh - 4, 3, COL_TEXT_DIM);
   }
 }
 
 static int dock_hit(int mx, int my) {
-  if (mx < 0 || mx >= DOCK_W || my < PANEL_H)
+  int bx, by, bw, bh;
+  dock_bar_geom(&bx, &by, &bw, &bh);
+  if (my < by || my >= video_height || mx < bx || mx >= bx + bw)
     return -1;
   for (int i = 0; i < DOCK_N; i++) {
     int x, y, w, h;
     dock_icon_geom(i, &x, &y, &w, &h);
-    if (mx >= x - 4 && mx < x + w + 4 && my >= y && my < y + h)
+    y -= 6; /* allow the hover-lift */
+    if (mx >= x - 4 && mx < x + w + 4 && my >= y && my < y + h + 6)
       return i;
   }
   return -1;
@@ -275,37 +289,25 @@ static void draw_window_chrome(GuiWindow *win) {
 
   video_shadow_rect(ox, oy, win->w, win->h, 12, 5);
   video_fill_round_rect(ox, oy, win->w, win->h, 12, COL_SURFACE);
-  if (win->focused)
-    video_draw_rect(ox, oy, win->w, win->h, COL_ORANGE_DIM);
-  else
-    video_draw_rect(ox, oy, win->w, win->h, COL_EDGE);
+  video_draw_rect(ox, oy, win->w, win->h, COL_EDGE);
 
-  /* GNOME-style header bar with soft vertical shading */
+  /* Unified light toolbar */
   video_fill_round_rect(ox + 1, oy + 1, win->w - 2, TITLE_H - 2, 10, COL_TITLE);
-  video_blend_round_rect(ox + 1, oy + 1, win->w - 2, (TITLE_H - 2) / 2, 10,
-                         COL_TEXT_INV, 50);
-  video_blend_rect(ox + 1, oy + TITLE_H / 2, win->w - 2, TITLE_H / 2 - 8,
-                   COL_BLACK, 14);
   video_fill_rect(ox + 1, oy + TITLE_H - 8, win->w - 2, 8, COL_TITLE);
-  /* Focused windows get an accent underline under the header */
-  if (win->focused)
-    video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 2, COL_ORANGE);
-  else
-    video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 1, COL_EDGE);
+  video_fill_rect(ox + 12, oy + TITLE_H, win->w - 24, 1, COL_EDGE);
 
   int cy = oy + TITLE_H / 2;
-  /* Window controls on the right (modern GNOME) */
-  int bx = ox + win->w - 78;
-  video_fill_circle(bx, cy, 7, COL_MIN);
-  video_fill_circle(bx + 24, cy, 7, COL_MAX);
-  video_fill_circle(bx + 48, cy, 7, COL_CLOSE);
+  /* Traffic lights on the LEFT (macOS): close, minimize, zoom */
+  video_fill_circle(ox + 22, cy, 7, COL_CLOSE);
+  video_fill_circle(ox + 46, cy, 7, COL_MIN);
+  video_fill_circle(ox + 70, cy, 7, COL_MAX);
 
   int tw = video_ui_width(win->title);
   int tx = ox + (win->w - tw) / 2;
-  if (tx < ox + 16)
-    tx = ox + 16;
-  if (tx + tw > bx - 12)
-    tx = bx - 12 - tw;
+  if (tx < ox + 90)
+    tx = ox + 90;
+  if (tx + tw > ox + win->w - 16)
+    tx = ox + win->w - 16 - tw;
   video_draw_ui(tx, oy + (TITLE_H - UI_CH) / 2, win->title, COL_TEXT);
 }
 
@@ -314,7 +316,7 @@ static void about_draw(GuiWindow *win) {
   int tx = win->x + 32;
   int ty = win->y + TITLE_H + 28;
   int clip = win->x + win->w - 24;
-  video_draw_string_scaled(tx, ty, "AJOS", COL_ORANGE, 0, 3);
+  video_draw_ui(tx, ty, "AJOS", COL_ORANGE);
   video_draw_ui_clip(tx, ty + 36, "Ubuntu-inspired desktop shell.", COL_TEXT,
                      clip);
   video_draw_ui_clip(tx, ty + 60, "Left dock launches apps. Esc exits.",
@@ -405,10 +407,9 @@ static void files_draw(GuiWindow *win) {
     if (!tmp[0])
       continue;
     int ry = cy + r * row_h;
-    /* Row icon: soft tile with gloss instead of a flat square. */
+    /* Row icon: soft tile with folder glyph */
     video_fill_round_rect(cx - 8, ry - 4, 22, 22, 6, COL_PANEL2);
-    video_blend_round_rect(cx - 8, ry - 4, 22, 11, 6, COL_TEXT_INV, 40);
-    draw_folder_glyph(cx - 10, ry - 6, 26, COL_ORANGE);
+    draw_folder_glyph(cx - 10, ry - 6, 26, vid_rgb(64, 156, 255));
     video_draw_ui_clip(cx + 28, ry, tmp, COL_TEXT, win->x + win->w - 28);
   }
 }
@@ -483,9 +484,8 @@ static void term_draw(GuiWindow *win) {
 
   int py = win->y + win->h - 40;
   video_fill_round_rect(win->x + 16, py - 6, win->w - 32, 34, 10,
-                        vid_rgb(12, 24, 54));
-  video_blend_round_rect(win->x + 16, py - 6, win->w - 32, 17, 10,
-                         COL_TEXT_INV, 18);
+                        vid_rgb(240, 242, 246));
+  video_draw_rect(win->x + 16, py - 6, win->w - 32, 34, COL_EDGE);
   video_draw_ui(cx, py, ">", COL_ORANGE);
   char prompt[80];
   size_t copy = term_line_len;
@@ -648,9 +648,8 @@ static void handle_click(int x, int y) {
   bring_to_front(idx);
   int lx = x - w->x;
   int ly = y - w->y;
-  /* Close is rightmost circle (GNOME layout) */
-  int close_x = w->w - 78 + 48;
-  if (ly < TITLE_H && lx >= close_x - 10 && lx <= close_x + 10) {
+  /* Close is the leftmost traffic light (macOS layout, at +22) */
+  if (ly < TITLE_H && lx >= 12 && lx <= 32) {
     hide_window(idx);
     return;
   }
@@ -687,7 +686,7 @@ void desktop_run(void) {
   files_buf[0] = '\0';
   files_scroll = 0;
 
-  int left = DOCK_W + 24;
+  int left = 24;
   int top = PANEL_H + 24;
   wins[n_wins].x = left + 20;
   wins[n_wins].y = top + 20;
@@ -749,11 +748,11 @@ void desktop_run(void) {
     if (drag_win >= 0 && mouse_left_pressed(&cur)) {
       wins[drag_win].x = cur.x - drag_ox;
       wins[drag_win].y = cur.y - drag_oy;
-      if (wins[drag_win].x < DOCK_W)
-        wins[drag_win].x = DOCK_W;
+      if (wins[drag_win].x < 0)
+        wins[drag_win].x = 0;
       if (wins[drag_win].y < PANEL_H)
         wins[drag_win].y = PANEL_H;
-      int maxy = video_height - 40;
+      int maxy = video_height - DOCK_H - 40;
       if (wins[drag_win].y > maxy)
         wins[drag_win].y = maxy;
     } else {

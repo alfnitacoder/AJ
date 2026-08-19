@@ -18,44 +18,44 @@ static inline uint32_t vid_rgb(uint8_t r, uint8_t g, uint8_t b) {
   return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-/* AJOS identity palette: deep ocean blues + cyan glow. Legacy color names
- * (COL_ORANGE etc.) now map to the blue scheme so all callers restyle. */
-#define COL_BG0 vid_rgb(6, 16, 42)
-#define COL_BG1 vid_rgb(16, 42, 88)
-#define COL_BG_TL vid_rgb(16, 38, 84)
-#define COL_BG_TR vid_rgb(10, 24, 58)
-#define COL_BG_BL vid_rgb(7, 16, 42)
-#define COL_BG_BR vid_rgb(3, 8, 24)
-/* accent (was orange) */
-#define COL_ORANGE vid_rgb(56, 152, 255)
-#define COL_ORANGE_DIM vid_rgb(34, 106, 190)
-/* secondary deep indigo (was aubergine) */
-#define COL_AUBERGINE vid_rgb(30, 52, 110)
-#define COL_TEAL vid_rgb(56, 152, 255) /* accent reuse for caret/focus */
-#define COL_TEAL_DIM vid_rgb(34, 106, 190)
-#define COL_ACCENT2 vid_rgb(34, 211, 238) /* cyan */
-#define COL_PANEL vid_rgb(244, 248, 255)
-#define COL_PANEL2 vid_rgb(228, 236, 250)
-#define COL_ICON vid_rgb(52, 60, 84)
-#define COL_ICON_HI vid_rgb(70, 82, 116)
-#define COL_SURFACE vid_rgb(250, 252, 255)
-#define COL_EDGE vid_rgb(198, 210, 230)
-#define COL_EDGE_HI vid_rgb(56, 152, 255)
-#define COL_TEXT vid_rgb(28, 36, 54)
-#define COL_TEXT_DIM vid_rgb(112, 126, 150)
-#define COL_TEXT_INV vid_rgb(240, 247, 255)
-#define COL_TITLE vid_rgb(238, 244, 254)
-#define COL_CLOSE vid_rgb(232, 72, 60)
-#define COL_MIN vid_rgb(56, 152, 255)
-#define COL_MAX vid_rgb(46, 180, 90)
-#define COL_TASKBAR vid_rgb(10, 18, 38)
-#define COL_TASK_BTN vid_rgb(20, 34, 64)
-#define COL_DOCK vid_rgb(8, 16, 36)
-#define COL_MENUBAR vid_rgb(8, 16, 36)
-#define COL_CURSOR vid_rgb(56, 152, 255)
+/* AJOS identity palette: macOS-inspired light theme. Legacy color names
+ * (COL_ORANGE etc.) map to the accent so all callers restyle. */
+#define COL_BG0 vid_rgb(168, 190, 232)
+#define COL_BG1 vid_rgb(226, 235, 248)
+#define COL_BG_TL vid_rgb(158, 184, 233)
+#define COL_BG_TR vid_rgb(192, 209, 240)
+#define COL_BG_BL vid_rgb(214, 226, 245)
+#define COL_BG_BR vid_rgb(240, 245, 251)
+/* accent (Apple blue; was orange) */
+#define COL_ORANGE vid_rgb(0, 122, 255)
+#define COL_ORANGE_DIM vid_rgb(0, 90, 190)
+/* secondary steel (was aubergine) */
+#define COL_AUBERGINE vid_rgb(100, 116, 139)
+#define COL_TEAL vid_rgb(0, 122, 255) /* accent reuse for caret/focus */
+#define COL_TEAL_DIM vid_rgb(0, 90, 190)
+#define COL_ACCENT2 vid_rgb(52, 199, 89)  /* green */
+#define COL_PANEL vid_rgb(248, 249, 251)
+#define COL_PANEL2 vid_rgb(238, 241, 245)
+#define COL_ICON vid_rgb(96, 106, 124)
+#define COL_ICON_HI vid_rgb(120, 132, 154)
+#define COL_SURFACE vid_rgb(255, 255, 255)
+#define COL_EDGE vid_rgb(208, 212, 220)
+#define COL_EDGE_HI vid_rgb(0, 122, 255)
+#define COL_TEXT vid_rgb(32, 36, 44)
+#define COL_TEXT_DIM vid_rgb(128, 136, 150)
+#define COL_TEXT_INV vid_rgb(255, 255, 255)
+#define COL_TITLE vid_rgb(246, 247, 249)
+#define COL_CLOSE vid_rgb(255, 95, 86)
+#define COL_MIN vid_rgb(255, 189, 46)
+#define COL_MAX vid_rgb(39, 201, 63)
+#define COL_TASKBAR vid_rgb(246, 247, 249)
+#define COL_TASK_BTN vid_rgb(228, 232, 238)
+#define COL_DOCK vid_rgb(244, 246, 250)
+#define COL_MENUBAR vid_rgb(250, 251, 253)
+#define COL_CURSOR vid_rgb(32, 36, 44)
 #define COL_BLACK vid_rgb(0, 0, 0)
-#define COL_TERM_BG vid_rgb(6, 14, 34)
-#define COL_TERM_FG vid_rgb(226, 238, 255)
+#define COL_TERM_BG vid_rgb(252, 252, 253)
+#define COL_TERM_FG vid_rgb(30, 34, 42)
 
 #ifndef AJOS_SERIAL_ONLY
 /* Carve a contiguous ARGB backbuffer from PMM while high-order blocks exist. */
