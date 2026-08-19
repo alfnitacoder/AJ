@@ -397,13 +397,14 @@ run-mirror:
 
 # VGA via VNC (keyboard works when the QEMU cocoa window ignores keys).
 # Connect with macOS Screen Sharing (Finder → Go → Connect to Server):
-#   vnc://localhost:5900
+#   vnc://localhost:5900   (password: ajos by default, override VNC_PASSWORD=)
+VNC_PASSWORD ?= ajos
 run-vnc:
 	$(MAKE) force-clean-standard
 	$(MAKE) $(OS_IMG) $(DATA_IMG)
 	cp $(OS_IMG) $(RUN_OS_IMG)
-	@echo "Connect with Screen Sharing: vnc://localhost:5900"
-	$(QEMU_RUN) -m 512M -vga std -display none -vnc 127.0.0.1:0 -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+	@echo "Connect with Screen Sharing: vnc://localhost:5900  (password: $(VNC_PASSWORD))"
+	$(QEMU_RUN) -m 512M -vga std -display none -object secret,id=vncsec,data=$(VNC_PASSWORD) -vnc 127.0.0.1:0,password-secret=vncsec -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
 
 # VGA text rendered in this Terminal (curses); type directly in the Terminal.
 # Text modes only — the GUI desktop won't render.
