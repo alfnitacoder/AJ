@@ -3,3 +3,5 @@
 build/
 *.bak
 *.backup
+openssh-portable/
+reference/
