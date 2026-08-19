@@ -19,6 +19,7 @@ static int vfs_initialized = 0;
 static int vfs_fat_open(void *fs_ctx, const char *path, int flags,
                         void **out_handle) {
   fat12_ctx *ctx = (fat12_ctx *)fs_ctx;
+  fat12_reload(ctx); /* mount ctx is long-lived; see FAT/dir changes */
   uint8_t *data = 0;
   uint32_t size = 0;
 
@@ -76,6 +77,7 @@ static int vfs_fat_close(void *fs_ctx, void *handle) {
 
 static int vfs_fat_stat(void *fs_ctx, const char *path, uint32_t *out_size) {
   fat12_ctx *ctx = (fat12_ctx *)fs_ctx;
+  fat12_reload(ctx);
   uint8_t *data = 0;
   uint32_t size = 0;
 
@@ -91,6 +93,7 @@ static int vfs_fat_stat(void *fs_ctx, const char *path, uint32_t *out_size) {
 static int vfs_fat_list(void *fs_ctx, const char *path, char ***out_names,
                         uint32_t *out_count) {
   fat12_ctx *ctx = (fat12_ctx *)fs_ctx;
+  fat12_reload(ctx);
   uint8_t *dir_buf = 0;
   uint32_t dir_bytes = 0;
 

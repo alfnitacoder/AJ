@@ -15,6 +15,51 @@
 /* Per-I/O trace logs (rd_probe, rd_hit_cache, wr_probe, cache_write, ...).
  * Set to 1 to re-enable sector-level disk debugging on the console. */
 #define DISK_TRACE_LOG 0
+
+extern void *kmalloc(uint32_t size);
+
+/* Write-behind cache for floppy sectors beyond the fixed boot cache
+ * (DISK_CACHE_SECTORS). QEMU BIOS floppy writes are unreliable; without
+ * this, file data written to clusters past the cache window is lost and
+ * reads return the original image contents (empty files). Heap-backed and
+ * bounded; enough for a full 1.44MB floppy written in patches. */
+#define FLOPPY_WB_SLOTS 256
+struct floppy_wb_slot {
+  uint32_t lba;
+  uint8_t *data;
+};
+static struct floppy_wb_slot floppy_wb[FLOPPY_WB_SLOTS];
+
+static void floppy_wb_store(uint32_t lba, const uint8_t *src512) {
+  int free_slot = -1;
+  for (int i = 0; i < FLOPPY_WB_SLOTS; i++) {
+    if (floppy_wb[i].data && floppy_wb[i].lba == lba) {
+      mem_copy(floppy_wb[i].data, src512, SECTOR_SIZE);
+      return;
+    }
+    if (!floppy_wb[i].data && free_slot < 0)
+      free_slot = i;
+  }
+  if (free_slot < 0)
+    free_slot = 0; /* full: recycle the first slot */
+  if (!floppy_wb[free_slot].data) {
+    floppy_wb[free_slot].data = kmalloc(SECTOR_SIZE);
+    if (!floppy_wb[free_slot].data)
+      return;
+  }
+  floppy_wb[free_slot].lba = lba;
+  mem_copy(floppy_wb[free_slot].data, src512, SECTOR_SIZE);
+}
+
+static int floppy_wb_fetch(uint32_t lba, uint8_t *dst512) {
+  for (int i = 0; i < FLOPPY_WB_SLOTS; i++) {
+    if (floppy_wb[i].data && floppy_wb[i].lba == lba) {
+      mem_copy(dst512, floppy_wb[i].data, SECTOR_SIZE);
+      return 1;
+    }
+  }
+  return 0;
+}
 #endif
 
 #define DISK_CACHE_BASE ((uint8_t *)0x51000u)
@@ -389,6 +434,12 @@ int disk_read_sector(uint8_t drive, uint32_t lba, uint8_t *dst512) {
     return 1;
   }
 
+  // Floppy sectors beyond the fixed cache: serve from write-behind cache
+  if (drive == ramdisk_drive && drive < 0x80u &&
+      lba >= (uint32_t)DISK_CACHE_SECTORS && floppy_wb_fetch(lba, dst512)) {
+    return 1;
+  }
+
   // ATA routing for hard disks
   if (ata_available && drive >= 0x80) {
     // Current ata.c only supports one "active" device.
@@ -515,6 +566,12 @@ int disk_write_sector(uint8_t drive, uint32_t lba, const uint8_t *src512) {
     }
 #endif
     // #endregion
+  }
+  /* Floppy sectors past the fixed cache window go to the write-behind
+   * cache (QEMU BIOS floppy writes don't stick). */
+  if (drive == ramdisk_drive && drive < 0x80u &&
+      lba >= (uint32_t)DISK_CACHE_SECTORS) {
+    floppy_wb_store(lba, src512);
   }
   return success;
 }

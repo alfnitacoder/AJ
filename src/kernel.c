@@ -531,6 +531,12 @@ static int syslog_enabled =
     0; /* off by default; use "syslog start" to enable */
 static int syslog_flushing = 0;
 static int syslog_flush_fail_count = 0;
+/* When syslog is enabled, also echo log output to the console (default off:
+ * logs go to /var/log/ajos only). Toggle with "syslog console". */
+static int syslog_console_echo = 0;
+/* Per-line classifier state for the syslog capture in log_putchar. */
+static int syslog_line_new = 1;
+static int syslog_line_tagged = 0;
 
 // Timer globals
 #define PIT_HZ 100u
@@ -1065,24 +1071,40 @@ void log_putchar(char c)
     return;
   }
 
-  // Syslog buffering
+  /* Syslog capture: when enabled, subsystem log lines — recognized by their
+   * "[TAG] ..." prefix ([SSH], [TCP], [AUTH], ...) — are buffered for
+   * /var/log/ajos and hidden from the console. Prompts and command output
+   * (no tag) still print normally. */
   if (syslog_enabled && !syslog_flushing)
   {
-    if (syslog_pos < SYSLOG_BUF_SIZE)
+    if (syslog_line_new && c == '[')
+      syslog_line_tagged = 1;
+    if (syslog_line_tagged)
     {
-      syslog_buffer[syslog_pos++] = c;
+      if (syslog_pos < SYSLOG_BUF_SIZE)
+      {
+        syslog_buffer[syslog_pos++] = c;
+      }
+      if (syslog_pos > SYSLOG_BUF_SIZE - 512)
+      {
+        flush_syslog();
+      }
+      if (c == '\n')
+      {
+        syslog_line_new = 1;
+        syslog_line_tagged = 0;
+      }
+      if (syslog_console_echo && c != '\r')
+      {
+        serial_putchar(c);
+      }
+      return;
     }
-    if (syslog_pos > SYSLOG_BUF_SIZE - 512)
-    {
-      flush_syslog();
-    }
-    // Don't print to VGA if syslog is enabled
-    // Serial is still useful for debugging
-    if (c != '\r')
-    {
-      serial_putchar(c);
-    }
-    return;
+    if (c == '\n')
+      syslog_line_new = 1;
+    else if (c != '\r')
+      syslog_line_new = 0;
+    /* Untagged output falls through to the console below. */
   }
 
   // In serial-only builds (used by `make run-console`), avoid writing to VGA.
@@ -6680,9 +6702,28 @@ static void ensure_var_log_exists(void)
   fat12_mkdir("var/log");
 }
 
+static int write_syslog_file(const char *logfile, const uint8_t *new_buf,
+                             uint32_t new_size) {
+  /* Root-level writes are the reliable path; subdirectory writes lose
+   * their contents (see docs/MEMORY.md). Try /var/log first and verify,
+   * falling back to a root-level ajos.log so logs are never lost. */
+  if (fat12_write_file("var/log/ajos", new_buf, new_size)) {
+    uint8_t *chk = 0;
+    uint32_t chk_size = 0;
+    if (fat12_read_file_to_ram("var/log/ajos", &chk, &chk_size) && chk &&
+        chk_size == new_size) {
+      kfree(chk);
+      return 1;
+    }
+    if (chk)
+      kfree(chk);
+  }
+  return fat12_write_file("ajos.log", new_buf, new_size) ? 2 : 0;
+}
+
 static void flush_syslog(void)
 {
-  if (syslog_flushing)
+  if (syslog_flushing || syslog_pos == 0)
     return;
   syslog_flushing = 1;
   int was_enabled = syslog_enabled;
@@ -6716,7 +6757,7 @@ static void flush_syslog(void)
     }
     kmemcpy(new_buf + old_size, (uint8_t *)syslog_buffer, syslog_pos);
 
-    if (fat12_write_file(logfile, new_buf, new_size))
+    if (write_syslog_file(logfile, new_buf, new_size))
     {
       syslog_pos = 0;
       syslog_flush_fail_count = 0;
@@ -6771,6 +6812,14 @@ static void cmd_syslog(const char *arg)
     flush_syslog();
     log_writestring("Syslog flushed.\n");
   }
+  else if (kstrcmp_n(s, "console", 7) == 0)
+  {
+    syslog_console_echo = !syslog_console_echo;
+    log_writestring(syslog_console_echo
+                        ? "Syslog console echo ENABLED (logs also shown here)\n"
+                        : "Syslog console echo disabled (logs go to "
+                          "/var/log/ajos only)\n");
+  }
   else if (kstrcmp_n(s, "status", 6) == 0)
   {
     log_writestring("Syslog: ");
@@ -6783,7 +6832,7 @@ static void cmd_syslog(const char *arg)
   }
   else
   {
-    log_writestring("Usage: syslog [start|stop|flush|status]\n");
+    log_writestring("Usage: syslog [start|stop|flush|console|status]\n");
   }
 }
 
@@ -8354,6 +8403,12 @@ void kernel_main()
   log_writestring(
       "[INIT] All initialization complete! About to show login prompt...\n");
   outb(0x3F8, 'L'); // Debug: Login prompt
+
+  /* Runtime logs (SSH sessions, network activity, services) go to
+   * /var/log/ajos instead of the console. Boot messages above stay on the
+   * console. Use "syslog console" to mirror logs back, "syslog stop" to
+   * disable. */
+  syslog_enabled = 1;
 
 #ifdef AJOS_NET_AUTOTEST
   log_writestring("[AUTOTEST] Network smoke test starting...\n");

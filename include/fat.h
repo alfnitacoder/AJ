@@ -114,6 +114,9 @@ typedef struct fat_ctx fat12_ctx;
 int fat12_init(fat12_ctx *ctx);
 int fat12_init_ex(fat12_ctx *ctx, uint8_t drive);
 void fat12_deinit(fat12_ctx *ctx);
+/* Refresh a long-lived ctx (VFS mount) to see FAT/dir changes made through
+ * other contexts. */
+void fat12_reload(fat12_ctx *ctx);
 uint32_t fat12_cluster_lba(const fat12_ctx *ctx, uint16_t cluster);
 uint16_t fat12_resolve_dir(const fat12_ctx *ctx, uint16_t start_dir,
                            const char *path, int *out_is_ok);

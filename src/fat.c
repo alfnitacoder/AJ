@@ -355,6 +355,24 @@ void fat12_deinit(fat12_ctx *ctx) {
     kfree(ctx->fat);
 }
 
+/* Refresh a long-lived context (e.g. the VFS mount) so it sees FAT and
+ * directory changes made through other contexts since it was created. */
+void fat12_reload(fat12_ctx *ctx) {
+  uint16_t spf = ctx->bpb.fat_size_sectors;
+  if (ctx->fat) {
+    for (uint16_t i = 0; i < spf; i++) {
+      if (!disk_read_sector(ctx->drive, ctx->fat_lba + i,
+                            ctx->fat + (uint32_t)i * 512u))
+        return;
+    }
+  }
+  for (int i = 0; i < FAT_CACHE_SIZE; i++) {
+    ctx->cache[i].sector = 0xFFFFFFFF;
+    ctx->cache[i].dirty = 0;
+    ctx->cache[i].access_time = 0;
+  }
+}
+
 uint32_t fat12_cluster_lba(const fat12_ctx *ctx, uint16_t cluster) {
   uint32_t root_lba =
       (uint32_t)ctx->bpb.reserved_sectors +
@@ -1182,8 +1200,13 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
       dir_part[dir_len] = '\0';
       int dok = 0;
       uint16_t resolved = fat12_resolve_dir(ctx, 0, dir_part, &dok);
-      if (dok)
-        target_dir = resolved;
+      if (!dok) {
+        log_writestring("[FAT] write: directory not found: ");
+        log_writestring(dir_part);
+        log_putchar('\n');
+        return 0;
+      }
+      target_dir = resolved;
     }
   }
 
@@ -1402,6 +1425,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
     uint32_t slot_in_sec = ent_slot_idx % 16u;
     uint32_t byte_off = slot_in_sec * 32u;
     for (uint16_t i = 0; i < ctx->root_sectors; i++) {
+#if FAT_TRACE_LOG
       if (i == sector_idx) {
         log_writestring("[FAT] root_write src_check lba=");
         log_write_u32(ctx->root_lba + i);
@@ -1415,6 +1439,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
         log_write_hex8(dir_buf[(uint32_t)i * 512u + byte_off]);
         log_putchar('\n');
       }
+#endif
       disk_write_sector(ctx->drive, ctx->root_lba + i,
                         dir_buf + (uint32_t)i * 512u);
     }
@@ -1422,6 +1447,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
     fat12_write_dir_cluster(ctx, target_dir, dir_buf, dir_bytes);
   }
 
+#if FAT_TRACE_LOG
   // Verify the just-written root directory entry before flushing FAT.
   if (target_dir == 0 && ent_slot_idx != 0xFFFFFFFFu) {
     uint32_t sector_idx = ent_slot_idx / 16u;      // 512/32 = 16 dir entries/sector
@@ -1467,8 +1493,10 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
       kfree(vbuf);
     }
   }
+#endif
 
   fat12_flush_fat(ctx);
+#if FAT_TRACE_LOG
   if (target_dir == 0 && ent_slot_idx != 0xFFFFFFFFu) {
     uint32_t sector_idx = ent_slot_idx / 16u;
     uint32_t slot_in_sec = ent_slot_idx % 16u;
@@ -1513,6 +1541,7 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
       kfree(vbuf);
     }
   }
+#endif
   // #region agent log
   agent_dbg_evt("A", "fat.c:fat12_write_file_ex", "write_done",
                 (uint32_t)target_dir, (uint32_t)size);
@@ -1540,8 +1569,48 @@ int fat12_mkdir(const char *fn) {
   agent_dbg_evt("A", "fat.c:fat12_mkdir", "mkdir_begin",
                 (uint32_t)fat12_cwd_cluster, 0);
   // #endregion
-  int ok = fat12_create_dir(&ctx, fat12_cwd_cluster, fn);
-  if (ok)
+  /* Support nested paths ("var/log"): create each component under the
+   * previous one, starting from root for absolute paths. */
+  uint16_t dir = (*fn == '/') ? 0 : fat12_cwd_cluster;
+  const char *p = fn;
+  int ok = 1;
+  int created = 0;
+  while (*p != '\0') {
+    while (*p == '/')
+      p++;
+    if (*p == '\0')
+      break;
+    char seg[32];
+    int si = 0;
+    while (*p != '\0' && *p != '/' && si < 31)
+      seg[si++] = *p++;
+    seg[si] = '\0';
+    if (seg[0] == '\0')
+      continue;
+
+    uint8_t n83[11];
+    fat12_to_83(seg, n83);
+    struct fat12_dirent ent;
+    if (fat12_find_in_dir(&ctx, dir, n83, &ent)) {
+      if (ent.attr & 0x10) {
+        dir = ent.first_cluster_lo; // exists as directory: descend
+        continue;
+      }
+      ok = 0; // exists as a file
+      break;
+    }
+    if (!fat12_create_dir(&ctx, dir, seg)) {
+      ok = 0;
+      break;
+    }
+    created = 1;
+    if (!fat12_find_in_dir(&ctx, dir, n83, &ent)) {
+      ok = 0;
+      break;
+    }
+    dir = ent.first_cluster_lo;
+  }
+  if (created && ok)
     fat12_flush_fat(&ctx);
   fat12_deinit(&ctx);
   return ok;
