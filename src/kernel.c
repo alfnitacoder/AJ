@@ -2410,9 +2410,16 @@ int input_getkey_noblock(void)
       }
     }
 
-    // Ignore key releases (bit 7 set)
+    // Ignore key releases (bit 7 set), but clear modifier state so a
+    // Shift/Ctrl release seen here doesn't leave the flag stuck on for
+    // whoever translates scancodes later.
     if (sc & 0x80)
     {
+      uint8_t make = (uint8_t)(sc & 0x7F);
+      if (make == 0x2A || make == 0x36)
+        keyboard_shift_down = 0;
+      if (make == 0x1D)
+        keyboard_ctrl_down = 0;
       continue;
     }
 
