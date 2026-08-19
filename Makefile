@@ -395,6 +395,24 @@ run-mirror:
 	cp $(OS_IMG) $(RUN_OS_IMG)
 	$(QEMU_RUN) -m 512M -vga std $(QEMU_DISPLAY) -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial stdio
 
+# VGA via VNC (keyboard works when the QEMU cocoa window ignores keys).
+# Connect with macOS Screen Sharing (Finder → Go → Connect to Server):
+#   vnc://localhost:5900
+run-vnc:
+	$(MAKE) force-clean-standard
+	$(MAKE) $(OS_IMG) $(DATA_IMG)
+	cp $(OS_IMG) $(RUN_OS_IMG)
+	@echo "Connect with Screen Sharing: vnc://localhost:5900"
+	$(QEMU_RUN) -m 512M -vga std -display none -vnc 127.0.0.1:0 -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+
+# VGA text rendered in this Terminal (curses); type directly in the Terminal.
+# Text modes only — the GUI desktop won't render.
+run-curses:
+	$(MAKE) force-clean-standard
+	$(MAKE) $(OS_IMG) $(DATA_IMG)
+	cp $(OS_IMG) $(RUN_OS_IMG)
+	$(QEMU_RUN) -m 512M -vga std -display curses -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+
 # Build serial-console image only (no QEMU). Use if run-console segfaults; then run QEMU manually.
 run-console-img:
 	$(MAKE) force-clean-serial
