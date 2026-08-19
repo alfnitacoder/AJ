@@ -26,7 +26,7 @@ def render_set(font_path, size, baseline, monitor_paths=None):
             x = (16 - w) // 2 - bbox[0]
         except Exception:
             x = 1
-        d.text((x, baseline), ch, font=f, fill=255)
+        d.text((x, baseline), ch, font=f, fill=255, stroke_width=1, stroke_fill=255)
         px = list(img.getdata())
         lv = []
         for p in px:
@@ -49,6 +49,6 @@ def pack(glyphs):
     return "".join(out)
 
 if __name__ == "__main__":
-    glyphs = render_set(HELV, 16, 13)
+    glyphs = render_set(HELV, 14, 12)
     open("include/font16_aa.h", "w").write(pack(glyphs))
     print("include/font16_aa.h regenerated from Helvetica")

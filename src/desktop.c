@@ -51,6 +51,9 @@ static int drag_win = -1;
 static int drag_ox, drag_oy;
 static int dock_pressed = -1;
 static uint32_t dock_press_until;
+/* Bumped whenever windows appear/disappear so the loop knows to redraw the
+ * wallpaper too (background behind a closed window must be restored). */
+static int layout_serial = 0;
 
 static char term_out[TERM_OUT_CAP];
 static size_t term_out_len;
@@ -141,11 +144,15 @@ static void draw_wallpaper(void) {
     return;
   }
   if (wall_cache && video_back) {
+    /* Identical copy of what's already displayed — suspend dirty tracking
+     * so this doesn't force a full-screen blit every frame. */
+    video_dirty_enable(0);
     uint32_t *d = (uint32_t *)video_back;
     uint32_t *s = (uint32_t *)wall_cache;
     uint32_t n = sz / 4u;
     for (uint32_t i = 0; i < n; i++)
       d[i] = s[i];
+    video_dirty_enable(1);
     return;
   }
   video_gradient_v(0, 0, video_width, video_height, COL_BG_TL, COL_BG_BR);
@@ -549,6 +556,7 @@ static void show_window(int idx) {
   wins[idx].visible = 1;
   wins[idx].anim = 5;
   bring_to_front(idx);
+  layout_serial++;
 }
 
 static void hide_window(int idx) {
@@ -556,6 +564,7 @@ static void hide_window(int idx) {
     return;
   wins[idx].visible = 0;
   wins[idx].focused = 0;
+  layout_serial++;
 }
 
 static int hit_window(int x, int y) {
@@ -588,9 +597,36 @@ static void draw_cursor(int x, int y) {
       if (rows[r][c] == 'X')
         video_put_pixel(x + c, y + r, COL_CURSOR);
       else if (rows[r][c] == '.')
-        video_put_pixel(x + c, y + r, COL_BLACK);
+        video_put_pixel(x + c, y + r, COL_SURFACE);
     }
   }
+}
+
+/* Cursor backing store: remember what is under the arrow so mouse-only
+ * moves don't force a full desktop redraw. */
+#define CUR_SZ 13
+static uint32_t cursor_under[CUR_SZ * CUR_SZ];
+static int cursor_saved = 0;
+static int cursor_sx, cursor_sy;
+
+static void cursor_save_draw(int x, int y) {
+  for (int r = 0; r < CUR_SZ; r++)
+    for (int c = 0; c < CUR_SZ; c++)
+      cursor_under[r * CUR_SZ + c] = video_get_pixel(x + c, y + r);
+  draw_cursor(x, y);
+  cursor_saved = 1;
+  cursor_sx = x;
+  cursor_sy = y;
+}
+
+static void cursor_restore(void) {
+  if (!cursor_saved)
+    return;
+  for (int r = 0; r < CUR_SZ; r++)
+    for (int c = 0; c < CUR_SZ; c++)
+      video_put_pixel(cursor_sx + c, cursor_sy + r,
+                      cursor_under[r * CUR_SZ + c]);
+  cursor_saved = 0;
 }
 
 static void desktop_draw_all(const mouse_state_t *m) {
@@ -608,7 +644,27 @@ static void desktop_draw_all(const mouse_state_t *m) {
       wins[i].anim--;
   }
 
-  draw_cursor(m->x, m->y);
+  cursor_saved = 0; /* windows redrew over the saved pixels */
+  cursor_save_draw(m->x, m->y);
+  video_present();
+}
+
+/* Panel + dock + windows over the existing wallpaper (no full reblit):
+ * used for caret blinks, typing, and clock ticks. */
+static void desktop_draw_windows(const mouse_state_t *m) {
+  draw_top_panel();
+  draw_left_dock(dock_hit(m->x, m->y));
+  for (int zi = 0; zi < n_wins; zi++) {
+    int i = win_order[zi];
+    if (!wins[i].visible)
+      continue;
+    if (wins[i].on_draw)
+      wins[i].on_draw(&wins[i]);
+    if (wins[i].anim > 0)
+      wins[i].anim--;
+  }
+  cursor_saved = 0;
+  cursor_save_draw(m->x, m->y);
   video_present();
 }
 
@@ -782,28 +838,61 @@ void desktop_run(void) {
 
     netdev_napi_poll(4);
 
-    /* Redraw only when something actually changed: constant reblits make
-     * the whole screen shimmer (no vsync on VESA LFB). */
+    /* Tiered redraws keep the display rock-still (no vsync on VESA LFB):
+     * - layout change (open/close/drag/anim/dock): full redraw
+     * - mouse-only move: cursor erase/redraw via backing store
+     * - caret blink / typing / clock: windows over existing wallpaper
+     */
     static int last_mx = -1, last_my = -1, last_btn = -1;
     static int last_caret = -1, last_dock_p = -2, last_min = -1;
-    static int any_anim;
+    static int last_serial = -1;
+    static int last_hover = -2;
+    static int first_frame = 1;
     int caret = (pit_ticks / 35) & 1;
     int minute = pit_ticks / 6000u;
-    any_anim = 0;
+    int any_anim = 0;
     for (int i = 0; i < n_wins; i++)
       if (wins[i].visible && wins[i].anim > 0)
         any_anim = 1;
-    if (cur.x != last_mx || cur.y != last_my ||
-        (int)cur.buttons != last_btn || caret != last_caret ||
-        dock_pressed != last_dock_p || minute != last_min || any_anim ||
-        key != -1) {
+    int dragging = (drag_win >= 0 && mouse_left_pressed(&cur));
+
+    if (first_frame || any_anim || layout_serial != last_serial ||
+        dragging || dock_pressed != last_dock_p) {
+      first_frame = 0;
+      last_serial = layout_serial;
+      last_dock_p = dock_pressed;
       last_mx = cur.x;
       last_my = cur.y;
       last_btn = cur.buttons;
       last_caret = caret;
-      last_dock_p = dock_pressed;
       last_min = minute;
       desktop_draw_all(&cur);
+    } else if (cur.x != last_mx || cur.y != last_my ||
+               (int)cur.buttons != last_btn) {
+      int moved = (cur.x != last_mx || cur.y != last_my);
+      last_mx = cur.x;
+      last_my = cur.y;
+      last_btn = cur.buttons;
+      int hover = dock_hit(cur.x, cur.y);
+      if (!moved) {
+        desktop_draw_windows(&cur); /* button change: repaint windows */
+        last_caret = caret;
+        last_min = minute;
+      } else if (hover != last_hover) {
+        last_hover = hover; /* dock icon lift changes */
+        cursor_saved = 0;
+        desktop_draw_windows(&cur);
+        last_caret = caret;
+        last_min = minute;
+      } else {
+        cursor_restore();
+        cursor_save_draw(cur.x, cur.y);
+        video_present();
+      }
+    } else if (caret != last_caret || minute != last_min || key != -1) {
+      last_caret = caret;
+      last_min = minute;
+      desktop_draw_windows(&cur);
     }
   }
 

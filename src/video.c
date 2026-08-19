@@ -31,6 +31,53 @@ static uint8_t *draw_surface(void) {
   return video_back ? video_back : video_fb;
 }
 
+/* --- Dirty-rectangle tracking: video_present() blits only what changed.
+ * Without vsync on the VESA LFB, full-screen reblits make the display
+ * shimmer. video_dirty_enable(0) suspends tracking for background copies
+ * that don't visibly change anything (e.g. wallpaper cache restore). */
+static int vid_dirty_active = 1;
+static int vid_dirty_valid = 0;
+static int vid_dx0, vid_dy0, vid_dx1, vid_dy1;
+
+void video_dirty_enable(int on) { vid_dirty_active = on; }
+
+void video_mark_dirty(int x, int y, int w, int h) {
+  if (!vid_dirty_active || w <= 0 || h <= 0)
+    return;
+  int x1 = x + w - 1, y1 = y + h - 1;
+  if (x < 0)
+    x = 0;
+  if (y < 0)
+    y = 0;
+  if (x1 > video_width - 1)
+    x1 = video_width - 1;
+  if (y1 > video_height - 1)
+    y1 = video_height - 1;
+  if (x > x1 || y > y1)
+    return;
+  if (!vid_dirty_valid || x < vid_dx0)
+    vid_dx0 = x;
+  if (!vid_dirty_valid || y < vid_dy0)
+    vid_dy0 = y;
+  if (!vid_dirty_valid || x1 > vid_dx1)
+    vid_dx1 = x1;
+  if (!vid_dirty_valid || y1 > vid_dy1)
+    vid_dy1 = y1;
+  vid_dirty_valid = 1;
+}
+
+static void mark_rect_clipped(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0)
+    return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > video_width) w = video_width - x;
+  if (y + h > video_height) h = video_height - y;
+  if (w <= 0 || h <= 0)
+    return;
+  video_mark_dirty(x, y, w, h);
+}
+
 static uint32_t video_bb_pool_bytes(void) {
   if (video_bb_order < 0 || !video_bb_pool)
     return 0;
@@ -269,20 +316,33 @@ uint8_t *video_wallpaper_slot(uint32_t frame_bytes) {
 void video_present(void) {
   if (!video_fb || !video_back)
     return;
+  int x0 = 0, y0 = 0, x1 = video_width - 1, y1 = video_height - 1;
+  if (vid_dirty_active) {
+    if (!vid_dirty_valid)
+      return; /* nothing changed since last present */
+    x0 = vid_dx0;
+    y0 = vid_dy0;
+    x1 = vid_dx1;
+    y1 = vid_dy1;
+    vid_dirty_valid = 0;
+  }
+  int rw = x1 - x0 + 1;
   if (video_bpp == 32 && video_pitch == video_width * 4) {
-    uint32_t n = (uint32_t)video_width * (uint32_t)video_height;
-    uint32_t *d = (uint32_t *)video_fb;
-    uint32_t *s = (uint32_t *)video_back;
-    for (uint32_t i = 0; i < n; i++)
-      d[i] = s[i];
+    for (int y = y0; y <= y1; y++) {
+      uint32_t *d = (uint32_t *)(video_fb + (uint32_t)y * video_pitch) + x0;
+      uint32_t *s = (uint32_t *)(video_back + (uint32_t)y * video_width * 4u) +
+                    x0;
+      for (int i = 0; i < rw; i++)
+        d[i] = s[i];
+    }
     return;
   }
-  /* 24bpp fast path: tight BGR pack (QEMU 0x118). */
+  /* 24bpp path: tight BGR pack (QEMU 0x118). */
   if (video_bpp == 24) {
-    for (int y = 0; y < video_height; y++) {
-      uint32_t *src = (uint32_t *)(video_back + y * video_width * 4);
-      uint8_t *dst = video_fb + y * video_pitch;
-      for (int x = 0; x < video_width; x++) {
+    for (int y = y0; y <= y1; y++) {
+      uint32_t *src = (uint32_t *)(video_back + y * video_width * 4) + x0;
+      uint8_t *dst = video_fb + y * video_pitch + (uint32_t)x0 * 3u;
+      for (int x = 0; x < rw; x++) {
         uint32_t c = src[x];
         dst[0] = (uint8_t)(c & 0xFF);
         dst[1] = (uint8_t)((c >> 8) & 0xFF);
@@ -322,6 +382,16 @@ static void put_raw(int x, int y, uint32_t color) {
   uint32_t *row =
       (uint32_t *)(draw_surface() + (uint32_t)y * (uint32_t)video_width * 4u);
   row[x] = color;
+  video_mark_dirty(x, y, 1, 1);
+}
+
+uint32_t video_get_pixel(int x, int y) {
+  if ((unsigned)x >= (unsigned)video_width ||
+      (unsigned)y >= (unsigned)video_height)
+    return 0;
+  uint32_t *row =
+      (uint32_t *)(draw_surface() + (uint32_t)y * (uint32_t)video_width * 4u);
+  return row[x];
 }
 
 void video_put_pixel(int x, int y, uint32_t color) { put_raw(x, y, color); }
@@ -331,6 +401,7 @@ void video_clear(uint32_t color) {
   uint32_t n = (uint32_t)video_width * (uint32_t)video_height;
   for (uint32_t i = 0; i < n; i++)
     p[i] = color;
+  video_mark_dirty(0, 0, video_width, video_height);
 }
 
 void video_fill_rect(int x, int y, int w, int h, uint32_t color) {
@@ -350,6 +421,7 @@ void video_fill_rect(int x, int y, int w, int h, uint32_t color) {
     h = video_height - y;
   if (w <= 0 || h <= 0)
     return;
+  mark_rect_clipped(x, y, w, h);
   for (int row = 0; row < h; row++) {
     uint32_t *p =
         (uint32_t *)(draw_surface() +
@@ -392,6 +464,7 @@ void video_blend_rect(int x, int y, int w, int h, uint32_t color,
     h = video_height - y;
   if (w <= 0 || h <= 0)
     return;
+  mark_rect_clipped(x, y, w, h);
   for (int row = 0; row < h; row++) {
     uint32_t *p =
         (uint32_t *)(draw_surface() +
@@ -447,6 +520,7 @@ void video_blend_round_rect(int x, int y, int w, int h, int r, uint32_t color,
                             uint8_t alpha) {
   if (w <= 0 || h <= 0)
     return;
+  mark_rect_clipped(x, y, w, h);
   for (int j = 0; j < h; j++) {
     if ((unsigned)(y + j) >= (unsigned)video_height)
       continue;
@@ -466,6 +540,7 @@ void video_blend_round_rect(int x, int y, int w, int h, int r, uint32_t color,
 void video_gradient_v(int x, int y, int w, int h, uint32_t c0, uint32_t c1) {
   if (w <= 0 || h <= 0)
     return;
+  mark_rect_clipped(x, y, w, h);
   uint32_t r0 = (c0 >> 16) & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = c0 & 0xFF;
   uint32_t r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
   for (int j = 0; j < h; j++) {
@@ -646,6 +721,7 @@ void video_blend_pixel(int x, int y, uint32_t color, uint8_t alpha) {
     return;
   uint32_t *row = (uint32_t *)(video_back + (uint32_t)y * video_pitch);
   row[x] = blend_px(row[x], color, alpha);
+  video_mark_dirty(x, y, 1, 1);
 }
 
 static void draw_glyph16(int x, int y, char c, uint32_t fg) {

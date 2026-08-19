@@ -69,6 +69,11 @@ void video_clear(uint32_t color);
 void video_put_pixel(int x, int y, uint32_t color);
 /* Alpha-blend a single pixel onto the backbuffer (GUI builds). */
 void video_blend_pixel(int x, int y, uint32_t color, uint8_t alpha);
+/* Read a backbuffer pixel (for cursor backing store). */
+uint32_t video_get_pixel(int x, int y);
+/* Dirty-rectangle tracking for video_present(). */
+void video_mark_dirty(int x, int y, int w, int h);
+void video_dirty_enable(int on);
 void video_fill_rect(int x, int y, int w, int h, uint32_t color);
 void video_blend_rect(int x, int y, int w, int h, uint32_t color, uint8_t alpha);
 void video_draw_rect(int x, int y, int w, int h, uint32_t color);
