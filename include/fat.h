@@ -118,6 +118,9 @@ uint32_t fat12_cluster_lba(const fat12_ctx *ctx, uint16_t cluster);
 uint16_t fat12_resolve_dir(const fat12_ctx *ctx, uint16_t start_dir,
                            const char *path, int *out_is_ok);
 void fat12_format_name(const uint8_t name[11], char out[13]);
+/* Display name (LFN if present, else 8.3) for entry at dir_buf + byte_idx. */
+void fat12_display_name(const uint8_t *dir_buf, uint32_t byte_idx,
+                        char *out_name, size_t max_len);
 
 int fat12_read_root_dir(const fat12_ctx *ctx, uint8_t **out_buf,
                         uint32_t *out_bytes);

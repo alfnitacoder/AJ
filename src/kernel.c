@@ -3834,8 +3834,8 @@ int shell_tab_complete(char *line, size_t *len, size_t cap,
       if (e->name[0] == 0xE5 || (e->attr & 0x08))
         continue;
 
-      char n[13];
-      fat12_format_name(e->name, n);
+      char n[256];
+      fat12_display_name(buf, i * 32u, n, sizeof(n));
 
       char lower[SHELL_TAB_MATCH_LEN];
       int j = 0;

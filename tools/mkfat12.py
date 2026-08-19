@@ -60,6 +60,53 @@ def to_83(name: str) -> bytes:
 class FileEntry:
     name: str
     data: bytes
+    lfn: str | None = None  # long name to store in LFN entries (mixed case)
+
+
+def lfn_checksum(name83: bytes) -> int:
+    s = 0
+    for b in name83:
+        s = (((s & 1) << 7) + (s >> 1) + b) & 0xFF
+    return s
+
+
+def needs_lfn(name: str) -> bool:
+    """A name needs an LFN entry if it isn't a plain uppercase 8.3 name."""
+    if len(name) > 12:
+        return True
+    base, _, ext = name.partition(".")
+    if len(base) > 8 or len(ext) > 3:
+        return True
+    return name != name.upper() or " " in name
+
+
+def lfn_entries(name: str, name83: bytes) -> list[bytes]:
+    """Build VFAT LFN directory entries (13 UTF-16 chars per entry) that
+    precede the 8.3 entry on disk."""
+    u16 = name.encode("utf-16-le")
+    assert len(u16) % 2 == 0
+    chars = [u16[i:i+2] for i in range(0, len(u16), 2)]
+    n_entries = (len(chars) + 12) // 13
+    # Pad the tail with 0x0000 terminator then 0xFFFF fill per spec.
+    chars.append(b"\x00\x00")
+    while len(chars) < n_entries * 13:
+        chars.append(b"\xff\xff")
+    cksum = lfn_checksum(name83)
+    out = []
+    for e in range(n_entries, 0, -1):
+        seq = e | 0x40 if e == n_entries else e
+        part = chars[(e - 1) * 13:(e - 1) * 13 + 13]
+        ent = bytearray(32)
+        ent[0] = seq
+        ent[1:11] = b"".join(part[0:5])    # name1
+        ent[11] = 0x0F                     # attr: LFN
+        ent[12] = 0                        # type
+        ent[13] = cksum
+        ent[14:26] = b"".join(part[5:11])  # name2
+        ent[26:28] = b"\x00\x00"           # first cluster
+        ent[28:32] = b"".join(part[11:13]) # name3
+        out.append(bytes(ent))
+    return out
 
 
 def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | None = None, kernel_bin: bytes | None = None) -> bytearray:
@@ -198,9 +245,18 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
 
     def add_root_entry(name: str, attr: int, first_cluster: int, size: int) -> None:
         nonlocal root_idx
+        name83 = to_83(name)
+        long_name = None
+        if needs_lfn(name):
+            long_name = name
+        if long_name:
+            for ent in lfn_entries(long_name, name83):
+                if root_idx >= ROOT_ENTRIES: raise RuntimeError("root dir full")
+                root[root_idx * 32:(root_idx + 1) * 32] = ent
+                root_idx += 1
         if root_idx >= ROOT_ENTRIES: raise RuntimeError("root dir full")
         entry = bytearray(32)
-        entry[0:11] = to_83(name)
+        entry[0:11] = name83
         entry[11] = attr
         struct.pack_into("<H", entry, 26, first_cluster)
         struct.pack_into("<I", entry, 28, size)

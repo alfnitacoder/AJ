@@ -123,8 +123,8 @@ static int vfs_fat_list(void *fs_ctx, const char *path, char ***out_names,
       break;
     if (e->name[0] == 0xE5 || (e->attr & 0x08))
       continue;
-    char formatted[13];
-    fat12_format_name(e->name, formatted);
+    char formatted[256];
+    fat12_display_name(dir_buf, i * 32u, formatted, sizeof(formatted));
     total_len += (uint32_t)(kstrlen(formatted) + 1);
     count++;
   }
@@ -157,8 +157,8 @@ static int vfs_fat_list(void *fs_ctx, const char *path, char ***out_names,
     if (e->name[0] == 0xE5 || (e->attr & 0x08))
       continue;
 
-    char formatted[13];
-    fat12_format_name(e->name, formatted);
+    char formatted[256];
+    fat12_display_name(dir_buf, i * 32u, formatted, sizeof(formatted));
     size_t len = kstrlen(formatted) + 1;
     if (off + (uint32_t)len <= total_len) {
       mem_copy(str_block + off, (const uint8_t *)formatted, (uint32_t)len);

@@ -707,9 +707,10 @@ static int fat_extract_lfn(const uint8_t *dir_buf, uint32_t start_idx,
   uint32_t idx = start_idx;
   uint8_t expected_checksum = 0;
 
-  // First, find the 8.3 entry to get checksum
-  if (idx >= 32) {
-    struct fat12_dirent *sfn = (struct fat12_dirent *)(dir_buf + (idx - 32));
+  // First, get checksum from the 8.3 entry itself (at start_idx; the entry
+  // before it is the last LFN entry, not the short name)
+  {
+    struct fat12_dirent *sfn = (struct fat12_dirent *)(dir_buf + start_idx);
     if (sfn->attr != FAT_ATTR_LFN) {
       expected_checksum = fat_lfn_checksum(sfn->name);
     }
@@ -779,6 +780,21 @@ static int fat_extract_lfn(const uint8_t *dir_buf, uint32_t start_idx,
 done:
   out_name[out_pos] = '\0';
   return 1;
+}
+
+/* Display name for the 8.3 entry at dir_buf + byte_idx: the long filename
+ * if valid LFN entries precede it, otherwise the 8.3 name itself. */
+void fat12_display_name(const uint8_t *dir_buf, uint32_t byte_idx,
+                        char *out_name, size_t max_len) {
+  if (byte_idx >= 32 && fat_extract_lfn(dir_buf, byte_idx, out_name, max_len))
+    return;
+  struct fat12_dirent *e = (struct fat12_dirent *)(dir_buf + byte_idx);
+  if (max_len < 13) {
+    if (max_len)
+      out_name[0] = '\0';
+    return;
+  }
+  fat12_format_name(e->name, out_name);
 }
 
 // Create LFN entries for a long filename
@@ -1837,8 +1853,8 @@ void cmd_ls(void) {
       break;
     if (e->name[0] == 0xE5 || (e->attr & 0x08))
       continue;
-    char name[13];
-    fat12_format_name(e->name, name);
+    char name[256];
+    fat12_display_name(buf, i * 32u, name, sizeof(name));
     log_writestring(name);
     if (e->attr & 0x10)
       log_writestring("  <DIR>\n");
@@ -1886,8 +1902,8 @@ void cmd_ls_path(const char *path) {
       break;
     if (e->name[0] == 0xE5 || (e->attr & 0x08))
       continue;
-    char name[13];
-    fat12_format_name(e->name, name);
+    char name[256];
+    fat12_display_name(buf, i * 32u, name, sizeof(name));
     log_writestring(name);
     if (e->attr & 0x10)
       log_writestring("  <DIR>\n");
