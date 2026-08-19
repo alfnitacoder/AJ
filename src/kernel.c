@@ -2825,7 +2825,6 @@ static const char *shell_commands[] = {"service",
                                        "http_stat",
                                        "http_test",
                                        "edit",
-                                       "gui",
                                        "ticks",
                                        "uptime",
                                        "ps",
@@ -7696,14 +7695,8 @@ static void shell_dispatch(const char *line)
   }
   if (cmd_clean_len == 3 && kstrcmp_n(cmd_clean, "gui", 3) == 0)
   {
-#ifdef AJOS_SERIAL_ONLY
-    log_writestring("gui: disabled in serial-only build (use make run)\n");
-#else
-    extern void desktop_run(void);
-    desktop_run();
-    terminal_clear();
-    log_writestring("Returned from GUI.\n");
-#endif
+    log_writestring(
+        "gui: removed (recoverable from git history: src/desktop.c)\n");
     return;
   }
   if (cmd_clean_len == 5 && kstrcmp_n(cmd_clean, "ticks", 5) == 0)
@@ -8354,9 +8347,6 @@ void kernel_main()
   tsc_calibrate();
   outb(0x3F8, (uint8_t)'M');
   pmm_init(512 * 1024 * 1024);
-#ifndef AJOS_SERIAL_ONLY
-  video_reserve_backbuffer();
-#endif
 
   outb(0x3F8, (uint8_t)'P');
   paging_init();

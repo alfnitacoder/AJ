@@ -92,7 +92,6 @@ USER_OBJ = $(BUILD_DIR)/user.o
 EDITOR_OBJ = $(BUILD_DIR)/editor.o
 VIDEO_OBJ = $(BUILD_DIR)/video.o
 MOUSE_OBJ = $(BUILD_DIR)/mouse.o
-DESKTOP_OBJ = $(BUILD_DIR)/desktop.o
 CRYPTO_OBJ = $(BUILD_DIR)/crypto.o
 RAMFS_OBJ = $(BUILD_DIR)/ramfs.o
 VFS_OBJ = $(BUILD_DIR)/vfs.o
@@ -253,7 +252,6 @@ $(VIDEO_OBJ): $(SRC_DIR)/video.c $(INC_DIR)/video.h
 $(MOUSE_OBJ): $(SRC_DIR)/mouse.c $(INC_DIR)/mouse.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(DESKTOP_OBJ): $(SRC_DIR)/desktop.c $(INC_DIR)/gui.h $(INC_DIR)/video.h $(INC_DIR)/mouse.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(CRYPTO_OBJ): $(CRYPTO_SRC)
@@ -295,7 +293,7 @@ $(BUILD_DIR)/openssh_ssherr.o: $(SRC_DIR)/openssh/ssherr.c
 
 
 # LLM (llm.o llm_math.o llm_inference.o) temporarily not linked — re-add $(LLM_OBJ) to restore.
-$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(DESKTOP_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ)
+$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ)
 	@echo "Linking kernel.elf (may take 30-60s)..."
 	$(LD) $(LDFLAGS) -o $@ $^
 
@@ -465,11 +463,11 @@ install-qemu-mac:
 	@echo "Done. Run: make run-console"
 
 force-clean-serial:
-	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(DESKTOP_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(AJLANG_OBJ) $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
+	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(AJLANG_OBJ) $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
 
 # Standard targets should also clean potentially serial-polluted objects
 force-clean-standard:
-	rm -f $(KERNEL_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(DESKTOP_OBJ) $(BIOS_OBJ)
+	rm -f $(KERNEL_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(BIOS_OBJ)
 
 # Run with ATA hard disk (for Phase 5 verification - no BIOS thunks)
 run-ata:
