@@ -7918,6 +7918,11 @@ static void shell_dispatch(const char *line)
     cmd_touch(rest);
     return;
   }
+  if (cmd_clean_len == 2 && kstrcmp_n(cmd_clean, "rm", 2) == 0)
+  {
+    cmd_rm(rest);
+    return;
+  }
   if (cmd_clean_len == 4 && kstrcmp_n(cmd_clean, "grep", 4) == 0)
   {
     cmd_grep(rest);

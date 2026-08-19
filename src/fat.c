@@ -2109,6 +2109,128 @@ void cmd_touch(const char *arg) {
     log_writestring("touch: failed\n");
 }
 
+int fat12_delete_file(const char *path) {
+  fat12_ctx ctx;
+  if (!fat12_init(&ctx))
+    return 0;
+
+  /* Split into parent directory + file name (same scheme as write_file_ex) */
+  const char *filename = path;
+  size_t fn_len = kstrlen(path);
+  for (size_t i = fn_len; i > 0; i--) {
+    if (path[i - 1] == '/') {
+      filename = path + i;
+      break;
+    }
+  }
+  uint16_t target_dir = fat12_cwd_cluster;
+  if (filename != path && filename > path + 1) {
+    const char *dir_start = (*path == '/') ? path + 1 : path;
+    size_t dir_len = (size_t)((filename - 1) - dir_start);
+    if (dir_len > 0 && dir_len < 64) {
+      char dir_part[64];
+      kmemcpy(dir_part, dir_start, dir_len);
+      dir_part[dir_len] = '\0';
+      int dok = 0;
+      uint16_t resolved = fat12_resolve_dir(&ctx, 0, dir_part, &dok);
+      if (!dok) {
+        fat12_deinit(&ctx);
+        return 0;
+      }
+      target_dir = resolved;
+    }
+  }
+
+  uint8_t *dir_buf = 0;
+  uint32_t dir_bytes = 0;
+  int ok = (target_dir == 0)
+               ? fat12_read_root_dir(&ctx, &dir_buf, &dir_bytes)
+               : fat12_read_dir_cluster(&ctx, target_dir, &dir_buf, &dir_bytes);
+  if (!ok) {
+    fat12_deinit(&ctx);
+    return 0;
+  }
+
+  uint32_t entries = dir_bytes / 32u;
+  for (uint32_t i = 0; i < entries; i++) {
+    struct fat12_dirent *e = (struct fat12_dirent *)(dir_buf + i * 32u);
+    if (e->name[0] == 0x00)
+      break;
+    if (e->name[0] == 0xE5 || (e->attr & 0x08))
+      continue;
+    if (e->attr == FAT_ATTR_LFN)
+      continue;
+
+    int match = 0;
+    if (i > 0) {
+      char extracted[256];
+      if (fat_extract_lfn(dir_buf, i * 32u, extracted, sizeof(extracted)) &&
+          kstreq_local(extracted, filename))
+        match = 1;
+    }
+    if (!match) {
+      char n83[13];
+      fat12_format_name(e->name, n83);
+      if (kstreq_local_nocase(n83, filename))
+        match = 1;
+    }
+    if (!match)
+      continue;
+
+    if (e->attr & 0x10) { /* directories need rmdir, not rm */
+      kfree(dir_buf);
+      fat12_deinit(&ctx);
+      return 0;
+    }
+
+    uint16_t first = e->first_cluster_lo;
+    /* Mark any LFN entries ahead of the 8.3 entry as deleted too. */
+    uint32_t j = i;
+    while (j > 0) {
+      struct fat_lfn_dirent *lfn =
+          (struct fat_lfn_dirent *)(dir_buf + (j - 1) * 32u);
+      if (lfn->attr != FAT_ATTR_LFN)
+        break;
+      ((struct fat12_dirent *)lfn)->name[0] = 0xE5;
+      j--;
+    }
+    e->name[0] = 0xE5;
+    fat12_free_chain(&ctx, first);
+    if (target_dir == 0) {
+      for (uint16_t s = 0; s < ctx.root_sectors; s++)
+        disk_write_sector(ctx.drive, ctx.root_lba + s,
+                          dir_buf + (uint32_t)s * 512u);
+    } else {
+      fat12_write_dir_cluster(&ctx, target_dir, dir_buf, dir_bytes);
+    }
+    fat12_flush_fat(&ctx);
+    kfree(dir_buf);
+    fat12_deinit(&ctx);
+    return 1;
+  }
+
+  kfree(dir_buf);
+  fat12_deinit(&ctx);
+  return 0;
+}
+
+void cmd_rm(const char *arg) {
+  const char *s = skip_spaces(arg);
+  if (*s == '\0') {
+    log_writestring("Usage: rm <FILE>\n");
+    return;
+  }
+  if (fat12_delete_file(s)) {
+    log_writestring("removed: ");
+    log_writestring(s);
+    log_putchar('\n');
+  } else {
+    log_writestring("rm: cannot remove '");
+    log_writestring(s);
+    log_writestring("'\n");
+  }
+}
+
 void cmd_grep(const char *arg) {
   const char *s = skip_spaces(arg);
   if (*s == '\0') {
