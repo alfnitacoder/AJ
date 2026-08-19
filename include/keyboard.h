@@ -27,4 +27,11 @@ enum {
   KEY_F12 = 0x11B
 };
 
+/* Non-blocking keyboard input. input_getkey_noblock() returns raw PS/2
+ * scancodes in VGA builds; input_getchar_noblock() translates to ASCII
+ * (shift/caps handled) and returns KEY_* constants for special keys. */
+int input_getkey_noblock(void);
+int input_getchar_noblock(void);
+int input_getkey(void);
+
 #endif

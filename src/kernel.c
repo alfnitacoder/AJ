@@ -2188,6 +2188,9 @@ static char scancode_to_ascii(uint8_t sc, uint8_t shifted)
   // Set 1 scancodes (US layout)
   switch (sc)
   {
+  case 0x01:
+    c = 27; /* Esc */
+    break;
   case 0x02:
     c = shifted ? '!' : '1';
     break;
@@ -2423,6 +2426,38 @@ int input_getkey_noblock(void)
   }
   return -1;
 #endif
+}
+
+/* Non-blocking input translated to ASCII (with shift/caps), for the GUI
+ * desktop: input_getkey_noblock() returns raw scancodes in VGA builds. */
+int input_getchar_noblock(void) {
+  for (;;) {
+    int k = input_getkey_noblock();
+    if (k == -1)
+      return -1;
+    if (k >= 0x100)
+      return k; /* KEY_UP/KEY_DOWN/... */
+    uint8_t sc = (uint8_t)k;
+    if (sc == 0x2A || sc == 0x36) {
+      keyboard_shift_down = 1;
+      continue;
+    }
+    if (sc == 0xAA || sc == 0xB6) {
+      keyboard_shift_down = 0;
+      continue;
+    }
+    if (sc == 0x1D) {
+      keyboard_ctrl_down = 1;
+      continue;
+    }
+    if (sc == 0x9D) {
+      keyboard_ctrl_down = 0;
+      continue;
+    }
+    char c = scancode_to_ascii(sc, keyboard_shift_down);
+    if (c)
+      return (unsigned char)c;
+  }
 }
 
 int input_getkey(void)

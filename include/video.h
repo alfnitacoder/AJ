@@ -18,41 +18,44 @@ static inline uint32_t vid_rgb(uint8_t r, uint8_t g, uint8_t b) {
   return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-/* Ubuntu / Yaru-inspired palette (aubergine + orange). */
-#define COL_BG0 vid_rgb(44, 0, 30)
-#define COL_BG1 vid_rgb(119, 33, 111)
-#define COL_BG_TL vid_rgb(90, 24, 84)
-#define COL_BG_TR vid_rgb(60, 12, 55)
-#define COL_BG_BL vid_rgb(44, 0, 30)
-#define COL_BG_BR vid_rgb(20, 0, 16)
-#define COL_ORANGE vid_rgb(233, 84, 32)
-#define COL_ORANGE_DIM vid_rgb(180, 60, 24)
-#define COL_AUBERGINE vid_rgb(119, 33, 111)
-#define COL_TEAL vid_rgb(233, 84, 32) /* accent reuse for caret/focus */
-#define COL_TEAL_DIM vid_rgb(180, 60, 24)
-#define COL_ACCENT2 vid_rgb(233, 84, 32)
-#define COL_PANEL vid_rgb(250, 250, 250)
-#define COL_PANEL2 vid_rgb(237, 237, 237)
-#define COL_ICON vid_rgb(55, 55, 60)
-#define COL_ICON_HI vid_rgb(70, 70, 78)
-#define COL_SURFACE vid_rgb(255, 255, 255)
-#define COL_EDGE vid_rgb(200, 200, 205)
-#define COL_EDGE_HI vid_rgb(233, 84, 32)
-#define COL_TEXT vid_rgb(40, 40, 45)
-#define COL_TEXT_DIM vid_rgb(110, 110, 120)
-#define COL_TEXT_INV vid_rgb(255, 255, 255)
-#define COL_TITLE vid_rgb(245, 245, 245)
+/* AJOS identity palette: deep ocean blues + cyan glow. Legacy color names
+ * (COL_ORANGE etc.) now map to the blue scheme so all callers restyle. */
+#define COL_BG0 vid_rgb(6, 16, 42)
+#define COL_BG1 vid_rgb(16, 42, 88)
+#define COL_BG_TL vid_rgb(16, 38, 84)
+#define COL_BG_TR vid_rgb(10, 24, 58)
+#define COL_BG_BL vid_rgb(7, 16, 42)
+#define COL_BG_BR vid_rgb(3, 8, 24)
+/* accent (was orange) */
+#define COL_ORANGE vid_rgb(56, 152, 255)
+#define COL_ORANGE_DIM vid_rgb(34, 106, 190)
+/* secondary deep indigo (was aubergine) */
+#define COL_AUBERGINE vid_rgb(30, 52, 110)
+#define COL_TEAL vid_rgb(56, 152, 255) /* accent reuse for caret/focus */
+#define COL_TEAL_DIM vid_rgb(34, 106, 190)
+#define COL_ACCENT2 vid_rgb(34, 211, 238) /* cyan */
+#define COL_PANEL vid_rgb(244, 248, 255)
+#define COL_PANEL2 vid_rgb(228, 236, 250)
+#define COL_ICON vid_rgb(52, 60, 84)
+#define COL_ICON_HI vid_rgb(70, 82, 116)
+#define COL_SURFACE vid_rgb(250, 252, 255)
+#define COL_EDGE vid_rgb(198, 210, 230)
+#define COL_EDGE_HI vid_rgb(56, 152, 255)
+#define COL_TEXT vid_rgb(28, 36, 54)
+#define COL_TEXT_DIM vid_rgb(112, 126, 150)
+#define COL_TEXT_INV vid_rgb(240, 247, 255)
+#define COL_TITLE vid_rgb(238, 244, 254)
 #define COL_CLOSE vid_rgb(232, 72, 60)
-#define COL_MIN vid_rgb(233, 84, 32)
+#define COL_MIN vid_rgb(56, 152, 255)
 #define COL_MAX vid_rgb(46, 180, 90)
-#define COL_TASKBAR vid_rgb(30, 30, 34)
-#define COL_TASK_BTN vid_rgb(50, 50, 56)
-#define COL_DOCK vid_rgb(28, 28, 32)
-#define COL_MENUBAR vid_rgb(32, 32, 36)
-#define COL_CURSOR vid_rgb(40, 40, 45)
+#define COL_TASKBAR vid_rgb(10, 18, 38)
+#define COL_TASK_BTN vid_rgb(20, 34, 64)
+#define COL_DOCK vid_rgb(8, 16, 36)
+#define COL_MENUBAR vid_rgb(8, 16, 36)
+#define COL_CURSOR vid_rgb(56, 152, 255)
 #define COL_BLACK vid_rgb(0, 0, 0)
-#define COL_TERM_BG vid_rgb(48, 10, 36)
-#define COL_TERM_FG vid_rgb(240, 240, 245)
+#define COL_TERM_BG vid_rgb(6, 14, 34)
+#define COL_TERM_FG vid_rgb(226, 238, 255)
 
 #ifndef AJOS_SERIAL_ONLY
 /* Carve a contiguous ARGB backbuffer from PMM while high-order blocks exist. */
@@ -64,6 +67,8 @@ int video_ui_scale(void);
 
 void video_clear(uint32_t color);
 void video_put_pixel(int x, int y, uint32_t color);
+/* Alpha-blend a single pixel onto the backbuffer (GUI builds). */
+void video_blend_pixel(int x, int y, uint32_t color, uint8_t alpha);
 void video_fill_rect(int x, int y, int w, int h, uint32_t color);
 void video_blend_rect(int x, int y, int w, int h, uint32_t color, uint8_t alpha);
 void video_draw_rect(int x, int y, int w, int h, uint32_t color);

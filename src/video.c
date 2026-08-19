@@ -635,6 +635,46 @@ int video_ui_scale(void) {
   return 2;
 }
 
+#ifndef AJOS_SERIAL_ONLY
+#include "font16_aa.h"
+
+/* Anti-aliased 16x16 glyph renderer: each pixel carries a 0-15 coverage
+ * level blended over whatever is already in the backbuffer, so UI text is
+ * smooth on any background. */
+void video_blend_pixel(int x, int y, uint32_t color, uint8_t alpha) {
+  if (x < 0 || y < 0 || x >= video_width || y >= video_height || !video_back)
+    return;
+  uint32_t *row = (uint32_t *)(video_back + (uint32_t)y * video_pitch);
+  row[x] = blend_px(row[x], color, alpha);
+}
+
+static void draw_glyph16(int x, int y, char c, uint32_t fg) {
+  unsigned char uc = (unsigned char)c;
+  const uint8_t *g = (uc < 32 || uc > 126) ? font16_aa[0] : font16_aa[uc - 32];
+  for (int i = 0; i < 128; i++) {
+    uint8_t byte = g[i];
+    if (!byte)
+      continue;
+    int lvl = (byte >> 4) & 0xF; /* high nibble: even pixel */
+    if (lvl) {
+      int px = x + ((i * 2) & 15), py = y + (i >> 3);
+      if (lvl == 15)
+        video_put_pixel(px, py, fg);
+      else
+        video_blend_pixel(px, py, fg, (uint8_t)(lvl * 17));
+    }
+    lvl = byte & 0xF; /* low nibble: odd pixel */
+    if (lvl) {
+      int px = x + ((i * 2 + 1) & 15), py = y + (i >> 3);
+      if (lvl == 15)
+        video_put_pixel(px, py, fg);
+      else
+        video_blend_pixel(px, py, fg, (uint8_t)(lvl * 17));
+    }
+  }
+}
+#endif
+
 void video_draw_ui_clip(int x, int y, const char *s, uint32_t fg,
                         int clip_x_end) {
   if (!s)
@@ -644,7 +684,11 @@ void video_draw_ui_clip(int x, int y, const char *s, uint32_t fg,
   while (*s) {
     if (cx + 8 * scale > clip_x_end)
       break;
+#ifdef AJOS_SERIAL_ONLY
     video_draw_char_scaled(cx, y, *s, fg, 0, scale);
+#else
+    draw_glyph16(cx, y, *s, fg);
+#endif
     cx += 8 * scale;
     s++;
   }

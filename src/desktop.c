@@ -11,7 +11,7 @@
 #ifndef AJOS_SERIAL_ONLY
 
 extern void shell_execute(const char *line);
-extern int input_getkey_noblock(void);
+extern int input_getchar_noblock(void);
 extern void netdev_napi_poll(int budget);
 extern volatile uint32_t pit_ticks;
 extern void shell_gui_sink_begin(char *buf, size_t cap);
@@ -208,9 +208,9 @@ static DockItem dock_items[DOCK_N] = {
 };
 
 static void dock_item_colors(void) {
-  dock_items[0].color = vid_rgb(48, 10, 36);
-  dock_items[1].color = COL_ORANGE;
-  dock_items[2].color = COL_AUBERGINE;
+  dock_items[0].color = vid_rgb(10, 22, 52);   /* Terminal: deep navy */
+  dock_items[1].color = vid_rgb(28, 108, 214); /* Files: bright blue */
+  dock_items[2].color = vid_rgb(58, 78, 148);  /* About: indigo */
 }
 
 static void dock_icon_geom(int kind, int *ox, int *oy, int *ow, int *oh) {
@@ -483,7 +483,7 @@ static void term_draw(GuiWindow *win) {
 
   int py = win->y + win->h - 40;
   video_fill_round_rect(win->x + 16, py - 6, win->w - 32, 34, 10,
-                        vid_rgb(60, 16, 48));
+                        vid_rgb(12, 24, 54));
   video_blend_round_rect(win->x + 16, py - 6, win->w - 32, 17, 10,
                          COL_TEXT_INV, 18);
   video_draw_ui(cx, py, ">", COL_ORANGE);
@@ -767,7 +767,7 @@ void desktop_run(void) {
     }
     prev = cur;
 
-    int key = input_getkey_noblock();
+    int key = input_getchar_noblock();
     if (key != -1) {
       if (key == 27) {
         running = 0;
@@ -782,7 +782,30 @@ void desktop_run(void) {
     }
 
     netdev_napi_poll(4);
-    desktop_draw_all(&cur);
+
+    /* Redraw only when something actually changed: constant reblits make
+     * the whole screen shimmer (no vsync on VESA LFB). */
+    static int last_mx = -1, last_my = -1, last_btn = -1;
+    static int last_caret = -1, last_dock_p = -2, last_min = -1;
+    static int any_anim;
+    int caret = (pit_ticks / 35) & 1;
+    int minute = pit_ticks / 6000u;
+    any_anim = 0;
+    for (int i = 0; i < n_wins; i++)
+      if (wins[i].visible && wins[i].anim > 0)
+        any_anim = 1;
+    if (cur.x != last_mx || cur.y != last_my ||
+        (int)cur.buttons != last_btn || caret != last_caret ||
+        dock_pressed != last_dock_p || minute != last_min || any_anim ||
+        key != -1) {
+      last_mx = cur.x;
+      last_my = cur.y;
+      last_btn = cur.buttons;
+      last_caret = caret;
+      last_dock_p = dock_pressed;
+      last_min = minute;
+      desktop_draw_all(&cur);
+    }
   }
 
   mouse_shutdown();

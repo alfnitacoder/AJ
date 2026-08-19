@@ -375,6 +375,13 @@ def main() -> int:
     kernel_bin = None
     if args.kernel:
         with open(args.kernel, "rb") as f: kernel_bin = f.read()
+        # The bootloader stages the kernel at 0x51000 and must stay below the
+        # VGA region at 0xA0000 -> hard ceiling of 0x4F000 bytes.
+        if len(kernel_bin) > 0x4F000:
+            raise RuntimeError(
+                f"kernel.bin too large ({len(kernel_bin)} > {0x4F000} bytes): "
+                "the boot staging area below 0xA0000 would overflow and "
+                "corrupt the kernel tail")
 
     sectors = args.size_mb * 1024 * 1024 // SECTOR_SIZE if args.size_mb > 0 else 2880
     
