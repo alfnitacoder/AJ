@@ -386,7 +386,7 @@ run:
 	$(MAKE) $(OS_IMG) $(DATA_IMG)
 	cp $(OS_IMG) $(RUN_OS_IMG)
 	@echo "Tip: resize the QEMU window to enlarge text, or View → Zoom In (⌘+)."
-	$(QEMU_RUN) -m 512M -vga std $(QEMU_DISPLAY) -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+	$(QEMU_RUN) -m 512M -vga std $(QEMU_DISPLAY) -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial file:build/console.log
 
 # Same as run, but also mirrors the console to this Terminal via -serial stdio.
 run-mirror:
@@ -404,7 +404,7 @@ run-vnc:
 	$(MAKE) $(OS_IMG) $(DATA_IMG)
 	cp $(OS_IMG) $(RUN_OS_IMG)
 	@echo "Connect with Screen Sharing: vnc://localhost:5900  (password: $(VNC_PASSWORD))"
-	$(QEMU_RUN) -m 512M -vga std -display none -object secret,id=vncsec,data=$(VNC_PASSWORD) -vnc 127.0.0.1:0,password-secret=vncsec -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+	$(QEMU_RUN) -m 512M -vga std -display none -object secret,id=vncsec,data=$(VNC_PASSWORD) -vnc 127.0.0.1:0,password-secret=vncsec -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial file:build/console.log
 
 # VGA text rendered in this Terminal (curses); type directly in the Terminal.
 # Text modes only — the GUI desktop won't render.
@@ -412,7 +412,7 @@ run-curses:
 	$(MAKE) force-clean-standard
 	$(MAKE) $(OS_IMG) $(DATA_IMG)
 	cp $(OS_IMG) $(RUN_OS_IMG)
-	$(QEMU_RUN) -m 512M -vga std -display curses -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial none
+	$(QEMU_RUN) -m 512M -vga std -display curses -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -serial file:build/console.log
 
 # Build serial-console image only (no QEMU). Use if run-console segfaults; then run QEMU manually.
 run-console-img:
