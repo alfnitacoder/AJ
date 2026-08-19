@@ -6,7 +6,9 @@
 // User account structure (like /etc/passwd entry)
 struct user_entry {
   char username[32];
-  char password_hash[64];  // Hashed password
+  /* "sha512$<16 hex salt>$<128 hex digest>" (152 chars + NUL); legacy
+   * PASSWD files store 8 djb2 hex chars and still verify. */
+  char password_hash[160];
   uint32_t uid;             // User ID
   uint32_t gid;             // Group ID (simplified: all users in group 0)
   char home[64];            // Home directory (for future use)

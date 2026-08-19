@@ -10,6 +10,8 @@ extern int fat12_read_file_to_ram(const char *path, uint8_t **out_buf, uint32_t 
 extern int fat12_write_file(const char *fn, const uint8_t *data, uint32_t size);
 extern void kfree(void *ptr);
 extern void *kmalloc(uint32_t size);
+extern void sha512(const uint8_t *data, size_t len, uint8_t *digest);
+extern volatile uint32_t pit_ticks; /* PIT_HZ == 100 */
 // Memory functions - use inline implementations
 static void _kmemcpy(void *dst, const void *src, size_t n) {
   uint8_t *d = (uint8_t *)dst;
@@ -85,19 +87,79 @@ static void trim_inplace(char *s) {
   }
 }
 
-// Simple password hashing (djb2 algorithm - can be upgraded to bcrypt/sha256 later)
+/* Salted SHA-512 password hashing.
+ *
+ * Stored format: "sha512$<salt as 16 hex chars>$<digest as 128 hex chars>"
+ * Legacy PASSWD images (tools/mkfat12.py) store 8 djb2 hex chars; those are
+ * still accepted by verify_password() so old floppies keep logging in.
+ * digest = SHA512(salt_bytes || password), salt is 8 bytes. */
+
+#define SALT_LEN 8
+
+static const char *hex_digits = "0123456789abcdef";
+
+/* Boot-time entropy is thin: mix PIT ticks with a call counter and the
+ * address of a stack local so repeated hashing in one boot differs. */
+static uint32_t hash_salt_entropy(void) {
+  static uint32_t salt_counter = 0;
+  uint32_t local = 0;
+  salt_counter += 0x9E3779B9u;
+  return pit_ticks ^ salt_counter ^ (uint32_t)&local;
+}
+
+static void bytes_to_hex(const uint8_t *bytes, int n, char *out) {
+  for (int i = 0; i < n; i++) {
+    out[i * 2] = hex_digits[(bytes[i] >> 4) & 0xF];
+    out[i * 2 + 1] = hex_digits[bytes[i] & 0xF];
+  }
+  out[n * 2] = '\0';
+}
+
+static int hex_nibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+/* Hash password with the given salt into out ("sha512$..." string). */
+static void hash_password_salted(const char *password, const uint8_t salt[SALT_LEN],
+                                 char *hash_out) {
+  uint8_t digest[64];
+  int plen = _strlen(password);
+
+  /* SHA512(salt || password) */
+  uint8_t buf[SALT_LEN + 64];
+  _kmemcpy(buf, salt, SALT_LEN);
+  for (int i = 0; i < plen && i < 64; i++)
+    buf[SALT_LEN + i] = (uint8_t)password[i];
+  sha512(buf, (size_t)(SALT_LEN + plen), digest);
+
+  _kmemset(hash_out, 0, 160);
+  _kmemcpy(hash_out, "sha512$", 7);
+  bytes_to_hex(salt, SALT_LEN, hash_out + 7);
+  hash_out[7 + SALT_LEN * 2] = '$';
+  bytes_to_hex(digest, 64, hash_out + 7 + SALT_LEN * 2 + 1);
+}
+
 static void hash_password(const char *password, char *hash_out) {
+  uint8_t salt[SALT_LEN];
+  uint32_t ent = hash_salt_entropy();
+  for (int i = 0; i < SALT_LEN; i++)
+    salt[i] = (uint8_t)(ent >> ((i % 4) * 8));
+  hash_password_salted(password, salt, hash_out);
+}
+
+/* Legacy djb2 kept only to verify old PASSWD images ("7C9C25DC" style). */
+static void legacy_hash_password(const char *password, char *hash_out) {
   uint32_t hash = 5381;
   int i = 0;
-  /* Caller may pass a 64-byte field; always leave a clean NUL-terminated digest. */
   for (int j = 0; j < 16; j++)
     hash_out[j] = '\0';
   while (password[i]) {
     hash = ((hash << 5) + hash) + (unsigned char)password[i];
     i++;
   }
-
-  /* 32-bit hash as 8 hex digits (matches PASSWD / mkfat12 default) */
   const char *hex = "0123456789ABCDEF";
   for (int j = 0; j < 8; j++)
     hash_out[j] = hex[(hash >> (28 - j * 4)) & 0xF];
@@ -123,17 +185,38 @@ static void seed_default_user(void) {
   }
 }
 
-/* Copy hash so PASSWD / FAT quirks (spaces, case) cannot break strcmp. */
+/* Copy hash so PASSWD / FAT quirks (spaces, case) cannot break strcmp.
+ * Accepts both the new "sha512$..." format and legacy 8-hex djb2 entries. */
 static int verify_password(const char *password, const char *hash) {
-  char computed_hash[64];
-  char norm[64];
+  char norm[160];
+  char computed[160];
   _kmemset(norm, 0, sizeof(norm));
   if (hash) {
     _strncpy(norm, hash, (int)sizeof(norm));
     trim_inplace(norm);
   }
-  hash_password(password, computed_hash);
-  return _strcmp(computed_hash, norm) == 0;
+
+  if (norm[0] == 's' && norm[1] == 'h' && norm[2] == 'a' && norm[3] == '5' &&
+      norm[4] == '1' && norm[5] == '2' && norm[6] == '$' && norm[7] != '\0') {
+    /* Parse "sha512$<salt hex>$<digest hex>" */
+    uint8_t salt[SALT_LEN];
+    for (int i = 0; i < SALT_LEN; i++) {
+      int hi = hex_nibble(norm[7 + i * 2]);
+      int lo = hex_nibble(norm[7 + i * 2 + 1]);
+      if (hi < 0 || lo < 0)
+        return 0;
+      salt[i] = (uint8_t)((hi << 4) | lo);
+    }
+    if (norm[7 + SALT_LEN * 2] != '$')
+      return 0;
+    hash_password_salted(password, salt, computed);
+    return _strcmp(computed, norm) == 0;
+  }
+
+  /* Legacy djb2 hash (old floppies / mkfat12 default). */
+  char legacy[16];
+  legacy_hash_password(password, legacy);
+  return _strcmp(legacy, norm) == 0;
 }
 
 // Find user by username
@@ -385,7 +468,8 @@ int user_load_from_file(void) {
         _strncpy(users[user_idx].username, fields[0], 32);
         _kmemset(users[user_idx].password_hash, 0,
                  sizeof(users[user_idx].password_hash));
-        _strncpy(users[user_idx].password_hash, fields[1], 64);
+        _strncpy(users[user_idx].password_hash, fields[1],
+                 (int)sizeof(users[user_idx].password_hash));
         
         // Parse UID
         uint32_t uid = 0;
