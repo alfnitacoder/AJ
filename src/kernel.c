@@ -7988,6 +7988,15 @@ static void shell_dispatch(const char *line)
     cmd_browser(rest);
     return;
   }
+  if (cmd_clean_len == 3 && kstrcmp_n(cmd_clean, "tls", 3) == 0)
+  {
+    extern int tls_selftest(void);
+    if (tls_selftest())
+      log_writestring("[TLS] all self-tests passed\n");
+    else
+      log_writestring("[TLS] self-tests FAILED\n");
+    return;
+  }
   if (cmd_clean_len == 4 && kstrcmp_n(cmd_clean, "grep", 4) == 0)
   {
     cmd_grep(rest);

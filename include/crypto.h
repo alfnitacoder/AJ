@@ -87,3 +87,12 @@ void aes128_ctr_crypt(uint8_t *key, uint8_t *ctr, uint8_t *data, int len);
 void aes128_ctr_keystream_block(const uint8_t *key, const uint8_t *ctr, uint8_t *out);
 
 #endif // CRYPTO_H
+
+/* TLS crypto primitives (src/tls.c) */
+void x25519_scalarmult(uint8_t out[32], const uint8_t scalar[32],
+                       const uint8_t point[32]);
+void x25519_base(uint8_t out[32], const uint8_t scalar[32]);
+void aes128gcm_encrypt(const uint8_t *key, const uint8_t iv[12],
+                       const uint8_t *aad, uint32_t aad_len, uint8_t *data,
+                       uint32_t len, uint8_t tag[16]);
+int tls_selftest(void);
