@@ -18,12 +18,9 @@ static int _strlen(const char *s) {
   return len;
 }
 
-// Static HTML content for captive portal
+// Static HTML content for captive portal (bodies only; headers are added
+// by http_send_page so Content-Length is always correct)
 static const char *html_login_page =
-    "HTTP/1.0 200 OK\r\n"
-    "Content-Type: text/html\r\n"
-    "Connection: close\r\n"
-    "\r\n"
     "<!DOCTYPE html>\n"
     "<html>\n"
     "<head>\n"
@@ -51,10 +48,6 @@ static const char *html_login_page =
     "</html>";
 
 static const char *html_success_page =
-    "HTTP/1.0 200 OK\r\n"
-    "Content-Type: text/html\r\n"
-    "Connection: close\r\n"
-    "\r\n"
     "<!DOCTYPE html>\n"
     "<html>\n"
     "<head>\n"
@@ -71,10 +64,6 @@ static const char *html_success_page =
     "</html>";
 
 static const char *html_not_found =
-    "HTTP/1.0 404 Not Found\r\n"
-    "Content-Type: text/html\r\n"
-    "Connection: close\r\n"
-    "\r\n"
     "<!DOCTYPE html>\n"
     "<html>\n"
     "<head><title>404 Not Found</title></head>\n"
@@ -245,49 +234,101 @@ void http_send_response(struct tcp_pcb *pcb, struct http_response *resp) {
   (void)resp;
 }
 
+/* Send a complete response with correct Content-Length and close the
+ * connection. Without Content-Length + FIN, clients block waiting for the
+ * body to end. */
+static void http_send_page(struct tcp_pcb *pcb, const char *status,
+                           const char *body) {
+  char hdr[160];
+  int blen = _strlen(body);
+  int n = 0;
+  const char *s = status;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+  const char *cl = "Content-Type: text/html\r\nContent-Length: ";
+  s = cl;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+  // append decimal length
+  char digits[12];
+  int d = 0;
+  if (blen == 0)
+    digits[d++] = '0';
+  int t = blen;
+  while (t > 0) {
+    digits[d++] = (char)('0' + t % 10);
+    t /= 10;
+  }
+  while (d > 0 && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = digits[--d];
+  const char *tail = "\r\nConnection: close\r\n\r\n";
+  s = tail;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+
+  tcp_send_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
+  if (blen > 0)
+    tcp_send_data(pcb, (const uint8_t *)body, (uint16_t)blen);
+  tcp_close(pcb);
+}
+
+/* Send a 302 redirect with an empty body and close. */
+static void http_send_redirect(struct tcp_pcb *pcb, const char *location) {
+  char hdr[192];
+  int n = 0;
+  const char *prefix = "HTTP/1.0 302 Found\r\nLocation: ";
+  const char *s = prefix;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+  s = location;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+  const char *tail = "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+  s = tail;
+  while (*s && n < (int)sizeof(hdr) - 1)
+    hdr[n++] = *s++;
+  tcp_send_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
+  tcp_close(pcb);
+}
+
 // Serve login page
 void http_serve_login_page(struct tcp_pcb *pcb) {
-  int len = 0;
-  const char *p = html_login_page;
-  while (p[len])
-    len++;
-
-  tcp_send_data(pcb, (const uint8_t *)html_login_page, len);
+  http_send_page(pcb, "HTTP/1.0 200 OK\r\n", html_login_page);
   log_writestring("[HTTP] Served login page\n");
 }
 
 // Serve success page
 void http_serve_success_page(struct tcp_pcb *pcb) {
-  int len = 0;
-  const char *p = html_success_page;
-  while (p[len])
-    len++;
-
-  tcp_send_data(pcb, (const uint8_t *)html_success_page, len);
+  http_send_page(pcb, "HTTP/1.0 200 OK\r\n", html_success_page);
   log_writestring("[HTTP] Served success page\n");
 }
 
 // Serve 404 page
 void http_serve_not_found(struct tcp_pcb *pcb) {
-  int len = 0;
-  const char *p = html_not_found;
-  while (p[len])
-    len++;
-
-  tcp_send_data(pcb, (const uint8_t *)html_not_found, len);
+  http_send_page(pcb, "HTTP/1.0 404 Not Found\r\n", html_not_found);
   log_writestring("[HTTP] Served 404 page\n");
 }
 
 // Handle authentication POST
 void http_handle_auth(struct tcp_pcb *pcb, struct http_request *req) {
-  // For now, accept any credentials
-  // TODO: Implement actual authentication
-  log_writestring("[HTTP] Auth request: ");
-  log_writestring(req->body);
-  log_putchar('\n');
+  // Parse body: "username=user&password=pass"
+  char user[32] = {0};
+  char pass[32] = {0};
 
-  // Redirect to success page
-  http_serve_success_page(pcb);
+  const char *u_ptr = http_strstr(req->body, "username=", 256);
+  const char *p_ptr = http_strstr(req->body, "password=", 256);
+
+  if (u_ptr)
+    http_copy_until(user, u_ptr + 9, '&', 32);
+  if (p_ptr)
+    http_copy_until(pass, p_ptr + 9, '&', 32);
+
+  if (auth_check_credentials(user, pass)) {
+    auth_set_authenticated(pcb->remote_ip);
+    http_send_redirect(pcb, "/success");
+  } else {
+    http_send_redirect(pcb, "/?error=1");
+  }
 }
 
 // Handle incoming HTTP connection
@@ -314,30 +355,7 @@ void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
   if (req.method == HTTP_METHOD_POST && req.uri[0] == '/' &&
       req.uri[1] == 'a' && req.uri[2] == 'u' && req.uri[3] == 't' &&
       req.uri[4] == 'h') {
-
-    // Parse body: "username=user&password=pass"
-    char user[32] = {0};
-    char pass[32] = {0};
-
-    const char *u_ptr = http_strstr(req.body, "username=", 256);
-    const char *p_ptr = http_strstr(req.body, "password=", 256);
-
-    if (u_ptr)
-      http_copy_until(user, u_ptr + 9, '&', 32);
-    if (p_ptr)
-      http_copy_until(pass, p_ptr + 9, '&', 32); // Assuming & or end
-
-    if (auth_check_credentials(user, pass)) {
-      auth_set_authenticated(pcb->remote_ip);
-
-      const char *redir = "HTTP/1.0 302 Found\r\nLocation: /success\r\n\r\n";
-      tcp_send_data(pcb, (const uint8_t *)redir, _strlen(redir));
-      return;
-    } else {
-      const char *redir = "HTTP/1.0 302 Found\r\nLocation: /?error=1\r\n\r\n";
-      tcp_send_data(pcb, (const uint8_t *)redir, _strlen(redir));
-      return;
-    }
+    http_handle_auth(pcb, &req);
   } else if (req.uri[0] == '/' &&
              (req.uri[1] == '\0' ||
               (req.uri[1] == 'l' && req.uri[2] == 'o' && req.uri[3] == 'g' &&
