@@ -6882,10 +6882,9 @@ static void vfs_cmd_ls(const char *args)
   uint32_t count = 0;
   char **names = 0;
   const char *path = skip_spaces(args);
-  /* With no args always list root so we see full root dir (avoids cwd e.g.
-   * /etc). */
+  /* No argument: list the current working directory (e.g. /var). */
   if (*path == '\0')
-    path = "/";
+    path = (fat12_cwd_path[0] != '\0') ? fat12_cwd_path : "/";
 
   if (vfs_list(vfs_get_global(), path, &names, &count))
   {
