@@ -13,6 +13,8 @@ struct file_slot {
 };
 
 int file_slot_save(const char *name, const uint8_t *data, uint32_t size);
+/** Drop a cached slot by name (used after deleting the file). */
+int file_slot_drop(const char *name);
 int file_slot_read(const char *name, uint8_t **out_buf, uint32_t *out_size);
 /** Peek at slot without copying; caller must not free *out_buf. Returns 1 if
  * found. */

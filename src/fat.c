@@ -80,6 +80,21 @@ void file_slot_init(void) {
   }
 }
 
+/* Drop a cached slot so reads fall through to disk (e.g. after rm). */
+int file_slot_drop(const char *name) {
+  int dropped = 0;
+  for (int i = 0; i < FILE_SLOTS; i++) {
+    if (file_slots[i].ptr != (void *)0 && kstreq(name, file_slots[i].name)) {
+      kfree(file_slots[i].ptr);
+      file_slots[i].ptr = (void *)0;
+      file_slots[i].size = 0;
+      file_slots[i].name[0] = '\0';
+      dropped = 1;
+    }
+  }
+  return dropped;
+}
+
 int file_slot_save(const char *name, const uint8_t *data, uint32_t size) {
   int id = -1;
   for (int i = 0; i < FILE_SLOTS; i++) {
@@ -2221,6 +2236,8 @@ void cmd_rm(const char *arg) {
     return;
   }
   if (fat12_delete_file(s)) {
+    /* Invalidate any RAM file-slot copy so cat stops serving it. */
+    file_slot_drop(s);
     log_writestring("removed: ");
     log_writestring(s);
     log_putchar('\n');
