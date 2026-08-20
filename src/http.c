@@ -246,7 +246,7 @@ static void http_send_page_buf(struct tcp_pcb *pcb, const char *status,
   const char *s = status;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
-  const char *cl = "Content-Type: text/html\r\nContent-Length: ";
+  const char *cl = "Content-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: ";
   s = cl;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
@@ -262,7 +262,7 @@ static void http_send_page_buf(struct tcp_pcb *pcb, const char *status,
   }
   while (d > 0 && n < (int)sizeof(hdr) - 1)
     hdr[n++] = digits[--d];
-  const char *tail = "\r\nConnection: close\r\n\r\n";
+  const char *tail = "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
   s = tail;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
@@ -302,7 +302,7 @@ static void http_send_redirect(struct tcp_pcb *pcb, const char *location) {
   s = location;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
-  const char *tail = "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+  const char *tail = "\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
   s = tail;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
