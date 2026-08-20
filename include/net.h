@@ -136,7 +136,7 @@ struct tcp_pcb {
   uint8_t last_tx_data[TCP_RTX_DATA_MAX];
 
   // Simple application RX buffer (used by `http_get` to print synchronously).
-#define TCP_APP_RX_MAX 4096
+#define TCP_APP_RX_MAX 8192
   volatile uint16_t app_rx_len;
   uint8_t app_rx_buf[TCP_APP_RX_MAX];
 };

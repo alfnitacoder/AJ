@@ -27,7 +27,7 @@ extern void dns_lookup(const char *name);
 extern volatile int dns_got_reply;
 extern volatile uint32_t dns_last_ip;
 
-#define PAGE_MAX 4096
+#define PAGE_MAX 8192
 #define LINE_MAX 90
 #define LINES_MAX 400
 #define VIEW_ROWS 23
@@ -337,6 +337,13 @@ static void html_to_lines(void) {
       i++;
     } else {
       i++;
+    }
+
+    if ((unsigned char)c >= 0x80) {
+      /* UTF-8 lead/continuation bytes (emoji, smart quotes): drop them
+       * so VGA text shows clean ASCII instead of garbage glyphs. */
+      i++;
+      continue;
     }
 
     if (c == ' ') {
