@@ -399,7 +399,20 @@ static void browser_render(int scroll) {
 }
 
 void cmd_browser(const char *args) {
-  const char *s = args;
+  /* Trim trailing whitespace: pasted URLs often carry spaces, and a
+   * trailing space inside the GET request line is a 400 Bad Request. */
+  char trimmed[192];
+  int tl = 0;
+  while (args[tl] && tl < (int)sizeof(trimmed) - 1) {
+    trimmed[tl] = args[tl];
+    tl++;
+  }
+  while (tl > 0 && (trimmed[tl - 1] == ' ' || trimmed[tl - 1] == '\t' ||
+                    trimmed[tl - 1] == '\r' || trimmed[tl - 1] == '\n'))
+    tl--;
+  trimmed[tl] = '\0';
+
+  const char *s = trimmed;
   while (*s == ' ')
     s++;
   if (!*s) {
