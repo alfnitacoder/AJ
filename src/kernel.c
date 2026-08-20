@@ -6882,9 +6882,32 @@ static void vfs_cmd_ls(const char *args)
   uint32_t count = 0;
   char **names = 0;
   const char *path = skip_spaces(args);
-  /* No argument: list the current working directory (e.g. /var). */
-  if (*path == '\0')
+  /* Prepend cwd for relative paths (same as cat) and default to the cwd
+   * when no argument is given. */
+  char path_buf[128];
+  if (*path == '\0') {
     path = (fat12_cwd_path[0] != '\0') ? fat12_cwd_path : "/";
+  } else if (path[0] != '/') {
+    size_t cwd_len = kstrlen(fat12_cwd_path);
+    if (cwd_len >= sizeof(path_buf) - 1)
+      cwd_len = sizeof(path_buf) - 2;
+    mem_copy((uint8_t *)path_buf, (const uint8_t *)fat12_cwd_path,
+             (uint32_t)cwd_len);
+    path_buf[cwd_len] = '\0';
+    if (cwd_len > 1 && path_buf[cwd_len - 1] != '/') {
+      path_buf[cwd_len++] = '/';
+      path_buf[cwd_len] = '\0';
+    }
+    size_t plen = kstrlen(path);
+    if (cwd_len + plen < sizeof(path_buf)) {
+      for (size_t i = 0; i <= plen; i++)
+        path_buf[cwd_len + i] = path[i];
+    } else {
+      path_buf[0] = '/';
+      path_buf[1] = '\0';
+    }
+    path = path_buf;
+  }
 
   if (vfs_list(vfs_get_global(), path, &names, &count))
   {
