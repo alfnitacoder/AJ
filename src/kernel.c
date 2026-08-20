@@ -537,6 +537,9 @@ static int syslog_console_echo = 0;
 /* Per-line classifier state for the syslog capture in log_putchar. */
 static int syslog_line_new = 1;
 static int syslog_line_tagged = 0;
+/* Rolling tail of the current console line, to detect async subsystem
+ * logs arriving after the shell prompt (prompts end in "> "). */
+static char syslog_line_tail[8];
 
 // Timer globals
 #define PIT_HZ 100u
@@ -1077,6 +1080,23 @@ void log_putchar(char c)
    * (no tag) still print normally. */
   if (syslog_enabled && !syslog_flushing)
   {
+    if (c == '[' && !syslog_line_tagged && !syslog_line_new) {
+      /* Async subsystem log arriving while the console line still shows
+       * the shell prompt (ends in "> "): finish that line, then capture
+       * the log cleanly instead of leaking it mid-prompt. */
+      int tl = 0;
+      while (tl < 7 && syslog_line_tail[tl])
+        tl++;
+      if (tl >= 2 && syslog_line_tail[tl - 1] == ' ' &&
+          syslog_line_tail[tl - 2] == '>') {
+        serial_putchar('\n');
+#ifndef AJOS_SERIAL_ONLY
+        terminal_putchar('\n');
+#endif
+        syslog_line_new = 1;
+        syslog_line_tail[0] = '\0';
+      }
+    }
     if (syslog_line_new && c == '[')
       syslog_line_tagged = 1;
     if (syslog_line_tagged)
@@ -1101,9 +1121,25 @@ void log_putchar(char c)
       return;
     }
     if (c == '\n')
+    {
       syslog_line_new = 1;
+      syslog_line_tail[0] = '\0';
+    }
     else if (c != '\r')
+    {
       syslog_line_new = 0;
+      int tl = 0;
+      while (tl < 7 && syslog_line_tail[tl])
+        tl++;
+      if (tl < 7) {
+        syslog_line_tail[tl++] = (char)c;
+        syslog_line_tail[tl] = '\0';
+      } else {
+        for (int i = 1; i < 7; i++)
+          syslog_line_tail[i - 1] = syslog_line_tail[i];
+        syslog_line_tail[6] = (char)c;
+      }
+    }
     /* Untagged output falls through to the console below. */
   }
 
