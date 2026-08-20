@@ -2860,6 +2860,7 @@ static const char *shell_commands[] = {"service",
                                        "users",
                                        "http_stat",
                                        "http_test",
+                                       "browser",
                                        "edit",
                                        "ticks",
                                        "uptime",
@@ -7979,6 +7980,12 @@ static void shell_dispatch(const char *line)
   if (cmd_clean_len == 2 && kstrcmp_n(cmd_clean, "rm", 2) == 0)
   {
     cmd_rm(rest);
+    return;
+  }
+  if (cmd_clean_len == 7 && kstrcmp_n(cmd_clean, "browser", 7) == 0)
+  {
+    extern void cmd_browser(const char *arg);
+    cmd_browser(rest);
     return;
   }
   if (cmd_clean_len == 4 && kstrcmp_n(cmd_clean, "grep", 4) == 0)

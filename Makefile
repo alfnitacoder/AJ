@@ -87,6 +87,7 @@ HTTP_OBJ = $(BUILD_DIR)/http.o
 SSH_OBJ = $(BUILD_DIR)/ssh.o
 DHCPD_OBJ = $(BUILD_DIR)/dhcpd.o
 DNSD_OBJ = $(BUILD_DIR)/dnsd.o
+BROWSER_OBJ = $(BUILD_DIR)/browser.o
 AUTH_OBJ = $(BUILD_DIR)/auth.o
 USER_OBJ = $(BUILD_DIR)/user.o
 EDITOR_OBJ = $(BUILD_DIR)/editor.o
@@ -228,6 +229,9 @@ $(NETCFG_OBJ): $(NETCFG_SRC)
 $(HTTP_OBJ): $(HTTP_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BROWSER_OBJ): $(SRC_DIR)/browser.c $(INC_DIR)/net.h $(INC_DIR)/keyboard.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(DHCPD_OBJ): $(DHCPD_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -293,7 +297,7 @@ $(BUILD_DIR)/openssh_ssherr.o: $(SRC_DIR)/openssh/ssherr.c
 
 
 # LLM (llm.o llm_math.o llm_inference.o) temporarily not linked — re-add $(LLM_OBJ) to restore.
-$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ)
+$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(BROWSER_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ)
 	@echo "Linking kernel.elf (may take 30-60s)..."
 	$(LD) $(LDFLAGS) -o $@ $^
 
