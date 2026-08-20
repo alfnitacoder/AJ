@@ -131,11 +131,16 @@ static int browser_fetch(const char *host, const char *path) {
       }
     }
     if (found_header_end) {
+      /* The server closes the connection after the body (Connection:
+       * close): the FIN is the definitive end-of-page signal. */
+      if (pcb->state == TCP_CLOSE_WAIT || pcb->state == TCP_CLOSED ||
+          pcb->state == TCP_CLOSING)
+        break;
       if (len == last_len) {
         if (stable_since == 0)
           stable_since = pit_ticks;
-        else if ((pit_ticks - stable_since) > 150u) /* ~1.5s at 100Hz */
-          break; /* no new data for 1.5s: page complete */
+        else if ((pit_ticks - stable_since) > 250u) /* 2.5s quiet: give up */
+          break;
       } else {
         stable_since = 0;
         last_len = len;
