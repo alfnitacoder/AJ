@@ -34,6 +34,8 @@ extern volatile uint32_t dns_last_ip;
 
 static char page_body[PAGE_MAX];
 static uint32_t page_body_len = 0;
+static int page_status = 0;
+static char page_location[160];
 static char lines[LINES_MAX][LINE_MAX];
 static int n_lines = 0;
 
@@ -158,6 +160,36 @@ static int browser_fetch(const char *host, const char *path) {
       break;
     }
   }
+  /* Parse status code and Location header from the response head */
+  page_status = 0;
+  page_location[0] = '\0';
+  for (uint16_t i = 5; i + 1 < hdr_end && page_status == 0; i++) {
+    if (pcb->app_rx_buf[i] == ' ') {
+      for (uint16_t j = i + 1;
+           j < hdr_end && pcb->app_rx_buf[j] >= '0' &&
+           pcb->app_rx_buf[j] <= '9';
+           j++)
+        page_status = page_status * 10 + (pcb->app_rx_buf[j] - '0');
+      break;
+    }
+  }
+  for (uint16_t i = 0; i + 9 < hdr_end; i++) {
+    if ((pcb->app_rx_buf[i] == 'L' || pcb->app_rx_buf[i] == 'l') &&
+        pcb->app_rx_buf[i + 1] == 'o' && pcb->app_rx_buf[i + 2] == 'c' &&
+        pcb->app_rx_buf[i + 3] == 'a' && pcb->app_rx_buf[i + 4] == 't' &&
+        pcb->app_rx_buf[i + 5] == 'i' && pcb->app_rx_buf[i + 6] == 'o' &&
+        pcb->app_rx_buf[i + 7] == 'n' && pcb->app_rx_buf[i + 8] == ':' &&
+        pcb->app_rx_buf[i + 9] == ' ') {
+      uint16_t j = i + 10;
+      int k = 0;
+      while (j < hdr_end && k < (int)sizeof(page_location) - 1 &&
+             pcb->app_rx_buf[j] != '\r' && pcb->app_rx_buf[j] != '\n')
+        page_location[k++] = (char)pcb->app_rx_buf[j++];
+      page_location[k] = '\0';
+      break;
+    }
+  }
+
   page_body_len = 0;
   for (uint16_t i = hdr_end; i < pcb->app_rx_len && page_body_len < PAGE_MAX;
        i++)
@@ -393,8 +425,40 @@ void cmd_browser(const char *args) {
     return;
   }
 
-  if (!browser_fetch(host, path)) {
-    return;
+  /* Fetch, following up to 3 http redirects */
+  for (int hop = 0; hop < 4; hop++) {
+    if (!browser_fetch(host, path)) {
+      return;
+    }
+    if (page_status >= 300 && page_status < 400 && page_location[0]) {
+      if (page_location[0] == 'h' && page_location[1] == 't' &&
+          page_location[2] == 't' && page_location[3] == 'p' &&
+          page_location[4] == 's') {
+        log_writestring("browser: redirect to ");
+        log_writestring(page_location);
+        log_writestring("\nbrowser: HTTPS is not supported (no TLS)\n");
+        return;
+      }
+      const char *loc = page_location;
+      if (loc[0] == 'h' && loc[1] == 't' && loc[2] == 't' && loc[3] == 'p' &&
+          loc[4] == ':' && loc[5] == '/' && loc[6] == '/')
+        loc += 7;
+      int hl = 0;
+      while (*loc && *loc != '/' && hl < (int)sizeof(host) - 1)
+        host[hl++] = *loc++;
+      host[hl] = '\0';
+      path = (*loc == '/') ? loc : "/";
+      if (!host[0]) {
+        log_writestring("browser: bad redirect target\n");
+        return;
+      }
+      log_writestring("browser: redirected to ");
+      log_writestring(host);
+      log_writestring(path);
+      log_putchar('\n');
+      continue;
+    }
+    break;
   }
 
   html_to_lines();
@@ -406,27 +470,38 @@ void cmd_browser(const char *args) {
   }
 
   int scroll = 0;
+  int need_render = 1;
   for (;;) {
-    browser_render(scroll);
+    if (need_render) {
+      browser_render(scroll);
+      need_render = 0;
+    }
     int key = input_getkey();
     if (key == 'q' || key == 'Q' || key == 27)
       break;
-    else if (key == KEY_UP)
-      scroll--;
+    int ns = scroll;
+    if (key == KEY_UP)
+      ns--;
     else if (key == KEY_DOWN)
-      scroll++;
+      ns++;
     else if (key == KEY_PAGEUP)
-      scroll -= VIEW_ROWS;
+      ns -= VIEW_ROWS;
     else if (key == KEY_PAGEDOWN)
-      scroll += VIEW_ROWS;
+      ns += VIEW_ROWS;
     else if (key == 'g')
-      scroll = 0;
+      ns = 0;
     else if (key == 'G')
-      scroll = n_lines - VIEW_ROWS;
-    if (scroll > n_lines - VIEW_ROWS)
-      scroll = n_lines - VIEW_ROWS;
-    if (scroll < 0)
-      scroll = 0;
+      ns = n_lines - VIEW_ROWS;
+    /* only redraw when the view actually moved (key repeat would
+     * otherwise reflash identical screens) */
+    if (ns > n_lines - VIEW_ROWS)
+      ns = n_lines - VIEW_ROWS;
+    if (ns < 0)
+      ns = 0;
+    if (ns != scroll) {
+      scroll = ns;
+      need_render = 1;
+    }
   }
   terminal_clear();
 }
