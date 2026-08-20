@@ -1,5 +1,6 @@
 #include "http.h"
 #include "auth.h"
+#include "fat.h"
 #include "net.h"
 #include <stddef.h>
 
@@ -10,6 +11,7 @@ extern void log_putchar(char c);
 extern struct tcp_pcb *tcp_get_free_pcb(void);
 extern int tcp_send_data(struct tcp_pcb *pcb, const uint8_t *data,
                          uint16_t len);
+extern void kfree(void *ptr);
 
 static int _strlen(const char *s) {
   int len = 0;
@@ -237,10 +239,9 @@ void http_send_response(struct tcp_pcb *pcb, struct http_response *resp) {
 /* Send a complete response with correct Content-Length and close the
  * connection. Without Content-Length + FIN, clients block waiting for the
  * body to end. */
-static void http_send_page(struct tcp_pcb *pcb, const char *status,
-                           const char *body) {
+static void http_send_page_buf(struct tcp_pcb *pcb, const char *status,
+                               const char *body, int blen) {
   char hdr[160];
-  int blen = _strlen(body);
   int n = 0;
   const char *s = status;
   while (*s && n < (int)sizeof(hdr) - 1)
@@ -272,6 +273,24 @@ static void http_send_page(struct tcp_pcb *pcb, const char *status,
   tcp_close(pcb);
 }
 
+static void http_send_page(struct tcp_pcb *pcb, const char *status,
+                           const char *body) {
+  http_send_page_buf(pcb, status, body, _strlen(body));
+}
+
+/* Serve var/www/<name> if present, else the compiled-in fallback. */
+static void http_serve_web_file(struct tcp_pcb *pcb, const char *status,
+                                const char *www_name, const char *fallback) {
+  uint8_t *buf = 0;
+  uint32_t size = 0;
+  if (fat12_read_file_to_ram(www_name, &buf, &size)) {
+    http_send_page_buf(pcb, status, (const char *)buf, (int)size);
+    kfree(buf);
+    return;
+  }
+  http_send_page(pcb, status, fallback);
+}
+
 /* Send a 302 redirect with an empty body and close. */
 static void http_send_redirect(struct tcp_pcb *pcb, const char *location) {
   char hdr[192];
@@ -291,21 +310,24 @@ static void http_send_redirect(struct tcp_pcb *pcb, const char *location) {
   tcp_close(pcb);
 }
 
-// Serve login page
+// Serve login page (var/www/index.html, compiled-in fallback)
 void http_serve_login_page(struct tcp_pcb *pcb) {
-  http_send_page(pcb, "HTTP/1.0 200 OK\r\n", html_login_page);
+  http_serve_web_file(pcb, "HTTP/1.0 200 OK\r\n", "var/www/index.html",
+                      html_login_page);
   log_writestring("[HTTP] Served login page\n");
 }
 
-// Serve success page
+// Serve success page (var/www/success.html, compiled-in fallback)
 void http_serve_success_page(struct tcp_pcb *pcb) {
-  http_send_page(pcb, "HTTP/1.0 200 OK\r\n", html_success_page);
+  http_serve_web_file(pcb, "HTTP/1.0 200 OK\r\n", "var/www/success.html",
+                      html_success_page);
   log_writestring("[HTTP] Served success page\n");
 }
 
-// Serve 404 page
+// Serve 404 page (var/www/404.html, compiled-in fallback)
 void http_serve_not_found(struct tcp_pcb *pcb) {
-  http_send_page(pcb, "HTTP/1.0 404 Not Found\r\n", html_not_found);
+  http_serve_web_file(pcb, "HTTP/1.0 404 Not Found\r\n", "var/www/404.html",
+                      html_not_found);
   log_writestring("[HTTP] Served 404 page\n");
 }
 

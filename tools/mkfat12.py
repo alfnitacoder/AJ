@@ -274,8 +274,43 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         struct.pack_into("<H", ent, 26, cluster)
         return bytes(ent)
 
-    def add_system_dirs() -> None:
-        """Linux-style system directories baked into every image."""
+    def add_dir_file(parent_cluster: int, name: str, data: bytes) -> None:
+        """Write a file into an existing directory cluster (LFN-aware)."""
+        first_cluster, size = alloc_file(data, name)
+        name83 = to_83(name)
+        ents = list(lfn_entries(name, name83)) if needs_lfn(name) else []
+        ent = bytearray(32)
+        ent[0:11] = name83
+        ent[11] = 0x20
+        struct.pack_into("<H", ent, 26, first_cluster)
+        struct.pack_into("<I", ent, 28, size)
+        ents.append(bytes(ent))
+
+        base = lba_of_cluster(parent_cluster, data_lba, sectors_per_cluster) * SECTOR_SIZE
+        dir_bytes = sectors_per_cluster * SECTOR_SIZE
+        total = len(ents)
+        run = 0
+        idx = 0
+        for off in range(0, dir_bytes, 32):
+            nm = img[base + off]
+            if nm == 0 or nm == 0xE5:
+                if run == 0:
+                    idx = off
+                run += 1
+                if run >= total:
+                    break
+            else:
+                run = 0
+        if run < total:
+            raise RuntimeError(f"directory full adding {name}")
+        o = idx
+        for e in ents:
+            img[base + o:base + o + 32] = e
+            o += 32
+
+    def add_system_dirs() -> int:
+        """Linux-style system directories baked into every image. Returns
+        the var/www cluster for web content."""
         etc_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"ETC        ", 0x10, etc_c))
         var_c = alloc_dir_cluster(0)
@@ -285,10 +320,13 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         var_lba = lba_of_cluster(var_c, data_lba, sectors_per_cluster)
         off = var_lba * SECTOR_SIZE + 64
         img[off:off + 32] = dir_entry_83(b"LOG        ", 0x10, log_c)
+        www_c = alloc_dir_cluster(var_c)
+        img[off + 32:off + 64] = dir_entry_83(b"WWW        ", 0x10, www_c)
         bin_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"BIN        ", 0x10, bin_c))
         tmp_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"TMP        ", 0x10, tmp_c))
+        return www_c
 
     def add_root_entry_raw(entry: bytes) -> None:
         nonlocal root_idx
@@ -320,7 +358,14 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         first_cluster, size = alloc_file(f.data, f.name)
         add_root_entry(f.name, 0x20, first_cluster, size)
 
-    add_system_dirs()
+    www_cluster = add_system_dirs()
+
+    # Web root: repo www/*.html -> var/www/ in the image
+    from pathlib import Path as _P
+    if _P("www").is_dir():
+        for wf in sorted(_P("www").iterdir()):
+            if wf.is_file():
+                add_dir_file(www_cluster, wf.name, wf.read_bytes())
 
     img[fat1_lba * SECTOR_SIZE:(fat1_lba + sectors_per_fat) * SECTOR_SIZE] = fat
     img[fat2_lba * SECTOR_SIZE:(fat2_lba + sectors_per_fat) * SECTOR_SIZE] = fat

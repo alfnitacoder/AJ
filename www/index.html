@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WiFi Login</title>
+  <style>
+    body { font-family: Arial; text-align: center; padding: 50px; }
+    h1 { color: #333; }
+    form { margin: 20px auto; max-width: 300px; }
+    input { width: 100%; padding: 10px; margin: 5px 0; }
+    button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Welcome to WiFi</h1>
+  <p>Please log in to access the internet</p>
+  <form method="POST" action="/auth">
+    <input type="text" name="username" placeholder="Username" required>
+    <input type="password" name="password" placeholder="Password" required>
+    <button type="submit">Connect</button>
+  </form>
+</body>
+</html>
+
+<!-- served from var/www -->
