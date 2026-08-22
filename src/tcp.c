@@ -197,7 +197,34 @@ static int tcp_output_segment_at(struct tcp_pcb *pcb, uint16_t flags,
   hdr->dst_port = htons(pcb->remote_port);
   hdr->seqno = htonl(seqno);
   hdr->ackno = htonl(pcb->rcv_nxt);
-  hdr->window = htons(TCP_LOCAL_RECV_WINDOW);
+  /* Advertise actual free space in app_rx_buf, not a static constant. The
+   * receive path below copies incoming data into app_rx_buf up to
+   * TCP_APP_RX_MAX but always acks the full segment regardless of how
+   * much was actually stored (to keep rcv_nxt in sync) — so if we ever
+   * advertise more window than we truly have room for, the peer can
+   * legally send more than fits, and the excess is silently dropped
+   * *and acked*, meaning it's gone for good (no retransmit, since we
+   * claimed to have received it). Capping the advertised window to real
+   * free space is what makes that combination safe. (SSH connections
+   * don't route through app_rx_buf, so this is effectively unrestricted
+   * for them.) */
+  {
+    /* The wire window field is 16 bits (max 65535) regardless of how big
+     * TCP_APP_RX_MAX is — this stack doesn't negotiate window scaling
+     * (RFC 1323). Computing this in uint32_t and clamping explicitly,
+     * rather than truncating a uint16_t cast, matters because the
+     * truncation is *silent*: TCP_APP_RX_MAX - app_rx_len can be an exact
+     * multiple of 65536 (e.g. 131072 - 0), which truncates to plain 0 —
+     * advertising a zero window from the very start of every connection,
+     * not a merely-too-small one. Seen live: bumping TCP_APP_RX_MAX past
+     * 65536 for more per-window throughput instead stalled every fetch
+     * completely. */
+    uint32_t free_space =
+        (pcb->app_rx_len < TCP_APP_RX_MAX) ? (TCP_APP_RX_MAX - pcb->app_rx_len)
+                                            : 0;
+    uint16_t win = (free_space > 65535u) ? 65535u : (uint16_t)free_space;
+    hdr->window = htons(win);
+  }
   hdr->chksum = 0;
   hdr->urgptr = 0;
 
@@ -260,6 +287,25 @@ static int tcp_output_segment_at(struct tcp_pcb *pcb, uint16_t flags,
 
 static void tcp_send_ack(struct tcp_pcb *pcb, uint16_t flags) {
   (void)tcp_output_segment_at(pcb, flags, pcb->snd_nxt, NULL, 0, 0);
+}
+
+/* Re-announce the current receive window in a fresh ACK. The window we
+ * advertise (see tcp_output_segment_at) reflects app_rx_buf's free space
+ * at send time, but we only ever send an ACK synchronously in response to
+ * an incoming segment. If a large response fills app_rx_buf enough to
+ * advertise a small window, the peer correctly pauses — and if the
+ * caller then drains app_rx_buf asynchronously (e.g. a poll loop calling
+ * tls_read(), which decrypts and compacts it), nothing tells the peer the
+ * window reopened until its own next segment happens to arrive, which
+ * may never come if it's the one waiting on us. Callers that drain
+ * app_rx_buf outside of the packet-receive path should call this right
+ * after, or a large-enough page (needing several times the buffer's
+ * capacity, e.g. seen live against a WordPress site sending it in ~16KB
+ * chunks) can silently stall after the first chunk. */
+void tcp_announce_window(struct tcp_pcb *pcb) {
+  if (!pcb || pcb->state != TCP_ESTABLISHED)
+    return;
+  tcp_send_ack(pcb, TCP_ACK);
 }
 
 int tcp_connect(struct tcp_pcb *pcb, ip_addr_t remote_ip,

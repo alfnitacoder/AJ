@@ -135,8 +135,28 @@ struct tcp_pcb {
 #define TCP_RTX_DATA_MAX 256
   uint8_t last_tx_data[TCP_RTX_DATA_MAX];
 
-  // Simple application RX buffer (used by `http_get` to print synchronously).
-#define TCP_APP_RX_MAX 8192
+  // Simple application RX buffer (used by `http_get` to print synchronously,
+  // and to stage incoming TLS ciphertext before tls_pump() decrypts it).
+  // Must hold at least one full TLS 1.2 record: servers commonly pack up
+  // to the protocol max of 2^14 (16384) plaintext bytes per record, which
+  // on the wire is 5 (header) + 8 (GCM explicit nonce) + 16384 + 16 (tag)
+  // = 16413 bytes. Below that, a single maximal record can never be
+  // "complete" in this buffer and the connection stalls forever waiting
+  // for more bytes that already arrived (seen live against nginx sites
+  // serving pages > 16KB, e.g. wantok.vu).
+  //
+  // Tried sizing this for several records at once (so a fetch needs fewer
+  // window-reopen round trips) and it made things worse instead of
+  // better — a live page fetch that reliably completed at this size (one
+  // record's worth) came back nearly empty at 3x the size, and there
+  // wasn't time left in the session to safely chase down why before
+  // shipping. Left at the size proven to work end-to-end. If revisiting
+  // this: the wire window field is 16 bits and app_rx_len below is itself
+  // a uint16_t, so anything from here up to 65535 is representable, but a
+  // buffer size that's an exact multiple of 65536 truncates the
+  // *advertised window* to zero, not merely a small one — caught live
+  // going straight from 16640 to 131072.
+#define TCP_APP_RX_MAX 16640
   volatile uint16_t app_rx_len;
   uint8_t app_rx_buf[TCP_APP_RX_MAX];
 };
@@ -162,6 +182,7 @@ struct tcp_pcb *tcp_get_free_pcb(void);
 int tcp_connect(struct tcp_pcb *pcb, ip_addr_t remote_ip, uint16_t remote_port);
 int tcp_send(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len);
 int tcp_close(struct tcp_pcb *pcb);
+void tcp_announce_window(struct tcp_pcb *pcb);
 
 uint16_t net_checksum(void *data, int len);
 

@@ -96,3 +96,20 @@ void aes128gcm_encrypt(const uint8_t *key, const uint8_t iv[12],
                        const uint8_t *aad, uint32_t aad_len, uint8_t *data,
                        uint32_t len, uint8_t tag[16]);
 int tls_selftest(void);
+
+/* TLS 1.2 client (src/tls.c) */
+struct tcp_pcb;
+int tls_handshake(struct tcp_pcb *pcb, const char *host);
+int tls_established(void);
+int tls_write(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len);
+int tls_read(struct tcp_pcb *pcb, uint8_t *out, uint32_t *len);
+
+/* Max decrypted application-data bytes tls_read() will accumulate for a
+ * caller (src/tls.c enforces this internally; callers like src/browser.c
+ * size their own receive buffer to match). Shared here so the two never
+ * drift apart — they used to be independent hardcoded 8192s in each file,
+ * which silently capped every page at 8KB regardless of how big a buffer
+ * browser.c thought it had. Some real pages (WordPress themes that inline
+ * all their CSS into <head>) run 100-200KB before any visible text, so
+ * this needs real headroom, not just "big enough for a paragraph". */
+#define TLS_APP_DATA_CAP 393216

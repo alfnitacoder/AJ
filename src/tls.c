@@ -8,6 +8,7 @@
  * NIST AES-128-GCM test case. Run with: tls selftest
  */
 #include "crypto.h"
+#include "net.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -320,12 +321,89 @@ static void gf128_mul(uint8_t z[16], const uint8_t x[16], const uint8_t y[16]) {
     z[i] = acc[i];
 }
 
-static void ghash_update(uint8_t y[16], const uint8_t h[16], const uint8_t *data,
-                         uint32_t len) {
+/* Table-based GHASH (Shoup's 8-bit method). gf128_mul() above costs 128
+ * iterations of shift-and-conditional-XOR per 16-byte block — measured at
+ * ~2.85KB/s end to end for real page fetches, dominated by exactly this
+ * loop (a ~270KB page is ~17 GCM records, each needing GHASH over its
+ * whole ciphertext). GF(2^128) multiplication is linear, so any 16-byte
+ * block X can be split into 16 single-nonzero-byte values (X[i] at
+ * position i, zero elsewhere) and X*H = XOR of each piece's product with
+ * H. Precomputing all 16*256 possible (position, byte value) products
+ * once per H turns every subsequent block multiply into 16 table lookups
+ * + XORs instead of 128 shift-and-test steps.
+ *
+ * Building the table costs 4096 of the slow multiplies, so it only pays
+ * off if reused across many blocks — which is exactly what happens
+ * across a TLS session's many records, since H depends only on the
+ * (unchanging) session key. Cached below and rebuilt only when H
+ * actually changes (new session, or the first real record after
+ * tls_selftest() exercised the same code path with its own throwaway
+ * key). */
+typedef struct {
+  uint8_t rows[16][256][16];
+} ghash_table_t;
+
+static void ghash_build_table(const uint8_t h[16], ghash_table_t *t) {
+  uint8_t v[16];
+  for (int i = 0; i < 16; i++)
+    v[i] = 0;
+  for (int i = 0; i < 16; i++) {
+    for (int b = 0; b < 256; b++) {
+      v[i] = (uint8_t)b;
+      gf128_mul(t->rows[i][b], v, h);
+    }
+    v[i] = 0;
+  }
+}
+
+static void gf128_mul_table(uint8_t z[16], const uint8_t x[16],
+                           const ghash_table_t *t) {
+  uint8_t acc[16];
+  for (int i = 0; i < 16; i++)
+    acc[i] = 0;
+  for (int i = 0; i < 16; i++) {
+    const uint8_t *row = t->rows[i][x[i]];
+    for (int k = 0; k < 16; k++)
+      acc[k] ^= row[k];
+  }
+  for (int i = 0; i < 16; i++)
+    z[i] = acc[i];
+}
+
+/* One cache slot per direction (client-write / server-write use different
+ * keys, hence different H). This kernel's TLS client only ever runs one
+ * session at a time (all state lives in the single global `tls`), so a
+ * plain "does this H match what we built for last time" cache is safe. */
+#define GHASH_SLOT_DECRYPT 0
+#define GHASH_SLOT_ENCRYPT 1
+static uint8_t cached_h[2][16];
+static ghash_table_t ghash_cache[2];
+static int ghash_cache_valid[2];
+
+static const ghash_table_t *ghash_table_for(const uint8_t h[16], int slot) {
+  int stale = !ghash_cache_valid[slot];
+  if (!stale) {
+    for (int i = 0; i < 16; i++)
+      if (cached_h[slot][i] != h[i]) {
+        stale = 1;
+        break;
+      }
+  }
+  if (stale) {
+    ghash_build_table(h, &ghash_cache[slot]);
+    for (int i = 0; i < 16; i++)
+      cached_h[slot][i] = h[i];
+    ghash_cache_valid[slot] = 1;
+  }
+  return &ghash_cache[slot];
+}
+
+static void ghash_update(uint8_t y[16], const ghash_table_t *t,
+                         const uint8_t *data, uint32_t len) {
   while (len >= 16) {
     for (int i = 0; i < 16; i++)
       y[i] ^= data[i];
-    gf128_mul(y, y, h);
+    gf128_mul_table(y, y, t);
     data += 16;
     len -= 16;
   }
@@ -337,7 +415,7 @@ static void ghash_update(uint8_t y[16], const uint8_t h[16], const uint8_t *data
       blk[i] = data[i];
     for (int i = 0; i < 16; i++)
       y[i] ^= blk[i];
-    gf128_mul(y, y, h);
+    gf128_mul_table(y, y, t);
   }
 }
 
@@ -361,8 +439,7 @@ void aes128gcm_encrypt(const uint8_t *key, const uint8_t iv[12],
     j0[i] = iv[i];
   j0[15] = 1; /* J0 = IV || 0^31 || 1 */
 
-  aes128_ctr_keystream_block(key, j0, h); /* H = E(K, 0^128) via zero j0? */
-  /* careful: H must be E(K, 0^128); compute directly */
+  /* H = E(K, 0^128) */
   {
     uint8_t zero[16], out[16];
     for (int i = 0; i < 16; i++)
@@ -391,25 +468,18 @@ void aes128gcm_encrypt(const uint8_t *key, const uint8_t iv[12],
     off += n;
   }
 
-  /* GHASH over AAD || pad || C || pad || lengths */
+  /* GHASH over AAD || C || lengths. ghash_update() already zero-pads a
+   * trailing partial block internally (XORs it in, then does ONE
+   * gf128_mul) — calling it again with explicit pad bytes here would
+   * process that padding as an extra, spurious GHASH block and corrupt
+   * the tag whenever aad_len/len isn't a multiple of 16 (which, for real
+   * TLS traffic, aad_len==13 never is). */
+  const ghash_table_t *gt = ghash_table_for(h, GHASH_SLOT_ENCRYPT);
   uint8_t y[16];
   for (int i = 0; i < 16; i++)
     y[i] = 0;
-  ghash_update(y, h, aad, aad_len);
-  /* zero-pad aad to 16 */
-  if (aad_len % 16) {
-    uint8_t pad[16];
-    for (int i = 0; i < 16; i++)
-      pad[i] = 0;
-    ghash_update(y, h, pad, 16 - (aad_len % 16));
-  }
-  ghash_update(y, h, data, len);
-  if (len % 16) {
-    uint8_t pad[16];
-    for (int i = 0; i < 16; i++)
-      pad[i] = 0;
-    ghash_update(y, h, pad, 16 - (len % 16));
-  }
+  ghash_update(y, gt, aad, aad_len);
+  ghash_update(y, gt, data, len);
   uint8_t lens[16];
   uint64_t abits = (uint64_t)aad_len * 8u;
   uint64_t cbits = (uint64_t)len * 8u;
@@ -417,7 +487,7 @@ void aes128gcm_encrypt(const uint8_t *key, const uint8_t iv[12],
     lens[i] = (uint8_t)(abits >> (56 - 8 * i));
     lens[8 + i] = (uint8_t)(cbits >> (56 - 8 * i));
   }
-  ghash_update(y, h, lens, 16);
+  ghash_update(y, gt, lens, 16);
 
   for (int i = 0; i < 16; i++)
     tag[i] = y[i] ^ ek[i];
@@ -561,4 +631,614 @@ int tls_selftest(void) {
   }
 
   return ok;
+}
+
+/* ------------------------------------------------------------------ */
+/* TLS 1.2 client: ECDHE-RSA-AES128-GCM-SHA256 (x25519), no cert      */
+/* verification (curl -k mode).                                        */
+/* ------------------------------------------------------------------ */
+
+extern void sha256(const uint8_t *data, size_t len, uint8_t *digest);
+extern struct tcp_pcb *tcp_get_free_pcb(void);
+extern int tcp_connect(struct tcp_pcb *pcb, ip_addr_t remote_ip,
+                       uint16_t port);
+extern int tcp_send(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len);
+extern int tcp_close(struct tcp_pcb *pcb);
+extern void sleep_ms(uint32_t ms);
+extern void kfree(void *ptr);
+extern volatile uint32_t pit_ticks;
+
+#define TLS_HS_MAX 16384
+
+static struct {
+  uint8_t client_random[32];
+  uint8_t server_random[32];
+  uint8_t master[48];
+  uint8_t ckey[16]; /* client write key */
+  uint8_t skey[16]; /* server write key */
+  uint8_t civ[4];   /* client write IV (salt) */
+  uint8_t siv[4];   /* server write IV (salt) */
+  uint64_t cseq, sseq;
+  uint8_t hs[TLS_HS_MAX];
+  uint32_t hs_len;
+  uint8_t srv_point[32];
+  uint8_t finished_ok;
+  int established;
+} tls;
+
+static void hs_reset(void) {
+  tls.hs_len = 0;
+  tls.cseq = 0;
+  tls.sseq = 0;
+  tls.established = 0;
+  tls.finished_ok = 0;
+}
+
+static int hs_append(const uint8_t *msg, uint32_t len) {
+  if (tls.hs_len + len > TLS_HS_MAX)
+    return 0;
+  for (uint32_t i = 0; i < len; i++)
+    tls.hs[tls.hs_len + i] = msg[i];
+  tls.hs_len += len;
+  return 1;
+}
+
+/* TLS 1.2 PRF (P_SHA256) */
+static void tls_prf(const uint8_t *secret, int slen, const char *label,
+                    const uint8_t *seed, int seedlen, uint8_t *out,
+                    int outlen) {
+  uint8_t lseed[96];
+  int ll = 0;
+  while (label[ll])
+    ll++;
+  uint8_t a[32];
+  uint8_t chunk[32];
+  int done = 0;
+  int lseedlen = ll + seedlen;
+  for (int i = 0; i < ll; i++)
+    lseed[i] = (uint8_t)label[i];
+  for (int i = 0; i < seedlen; i++)
+    lseed[ll + i] = seed[i];
+
+  /* A(1) = HMAC(secret, seed) */
+  ssh_hmac_sha256(secret, slen, lseed, lseedlen, a);
+  while (done < outlen) {
+    uint8_t aseed[128];
+    for (int i = 0; i < 32; i++)
+      aseed[i] = a[i];
+    for (int i = 0; i < lseedlen; i++)
+      aseed[32 + i] = lseed[i];
+    ssh_hmac_sha256(secret, slen, aseed, 32 + lseedlen, chunk);
+    for (int i = 0; i < 32 && done < outlen; i++)
+      out[done++] = chunk[i];
+    ssh_hmac_sha256(secret, slen, a, 32, a); /* A(i+1) */
+  }
+}
+
+/* entropy: hash of time + counter + stack address */
+static void tls_random(uint8_t *out, int n) {
+  static uint32_t ctr;
+  uint8_t seed[16];
+  uint8_t digest[32];
+  ctr += 0x9E3779B9u;
+  for (int off = 0; off < n; off += 32) {
+    uint32_t t = pit_ticks ^ (ctr + (uint32_t)off);
+    for (int i = 0; i < 4; i++)
+      seed[i] = (uint8_t)(t >> (8 * i));
+    for (int i = 4; i < 16; i++)
+      seed[i] = (uint8_t)(ctr >> (8 * (i & 3)));
+    sha256(seed, sizeof(seed), digest);
+    for (int i = 0; i < 32 && off + i < n; i++)
+      out[off + i] = digest[i];
+  }
+}
+
+static void put16(uint8_t *p, uint16_t v) {
+  p[0] = (uint8_t)(v >> 8);
+  p[1] = (uint8_t)v;
+}
+
+/* ---- record layer ---- */
+
+static int tls_send_record_raw(struct tcp_pcb *pcb, uint8_t type,
+                               const uint8_t *payload, uint16_t len) {
+  uint8_t hdr[5];
+  hdr[0] = type;
+  hdr[1] = 0x03;
+  hdr[2] = 0x03;
+  put16(hdr + 3, len);
+  if (tcp_send(pcb, hdr, 5) != 0)
+    return 0;
+  if (len && tcp_send(pcb, payload, len) != 0)
+    return 0;
+  return 1;
+}
+
+/* send plaintext or GCM-protected depending on state */
+static int tls_send_record(struct tcp_pcb *pcb, uint8_t type,
+                           const uint8_t *payload, uint16_t len) {
+  if (!tls.established)
+    return tls_send_record_raw(pcb, type, payload, len);
+
+  /* GCM: explicit nonce = 8-byte BE sequence number */
+  uint8_t nonce[12];
+  uint8_t aad[13];
+  uint8_t tag[16];
+  uint8_t buf[512];
+  if (len > (uint16_t)(sizeof(buf) - 8 - 16))
+    return 0; /* our messages are always small */
+  for (int i = 0; i < 4; i++)
+    nonce[i] = tls.civ[i];
+  for (int i = 0; i < 8; i++)
+    nonce[4 + i] = (uint8_t)(tls.cseq >> (56 - 8 * i));
+  /* AAD = seq || type || version || length */
+  for (int i = 0; i < 8; i++)
+    aad[i] = (uint8_t)(tls.cseq >> (56 - 8 * i));
+  aad[8] = type;
+  aad[9] = 0x03;
+  aad[10] = 0x03;
+  put16(aad + 11, len);
+  for (int i = 0; i < len; i++)
+    buf[i] = payload[i];
+  aes128gcm_encrypt(tls.ckey, nonce, aad, 13, buf, len, tag);
+  tls.cseq++;
+
+  uint8_t out[540];
+  out[0] = type;
+  out[1] = 0x03;
+  out[2] = 0x03;
+  put16(out + 3, (uint16_t)(len + 8 + 16));
+  for (int i = 0; i < 8; i++)
+    out[5 + i] = nonce[4 + i];
+  for (int i = 0; i < len; i++)
+    out[13 + i] = buf[i];
+  for (int i = 0; i < 16; i++)
+    out[13 + len + i] = tag[i];
+  return tcp_send(pcb, out, (uint16_t)(13 + len + 16)) == 0;
+}
+
+/* decrypt one received GCM record body in place.
+ * rec = explicit(8) || ct || tag(16). Returns plaintext len or -1. */
+static int tls_gcm_open(uint8_t type, const uint8_t *rec, uint16_t reclen,
+                        uint8_t *out) {
+  if (reclen < 8 + 16)
+    return -1;
+  uint16_t ctlen = (uint16_t)(reclen - 8 - 16);
+  uint8_t nonce[12];
+  uint8_t aad[13];
+  uint8_t tag[16];
+  for (int i = 0; i < 4; i++)
+    nonce[i] = tls.siv[i];
+  for (int i = 0; i < 8; i++)
+    nonce[4 + i] = rec[i];
+  for (int i = 0; i < 8; i++)
+    aad[i] = (uint8_t)(tls.sseq >> (56 - 8 * i));
+  aad[8] = type;
+  aad[9] = 0x03;
+  aad[10] = 0x03;
+  put16(aad + 11, ctlen);
+  for (int i = 0; i < 16; i++)
+    tag[i] = rec[8 + ctlen + i];
+
+  /* tag over the ciphertext as received, then keystream-xor */
+  uint8_t h[16], y[16], ek[16], j0[16], ctr[16], lens[16];
+  for (int i = 0; i < 16; i++) {
+    h[i] = 0;
+    j0[i] = 0;
+  }
+  {
+    uint8_t zero[16], outb[16];
+    for (int i = 0; i < 16; i++)
+      zero[i] = 0;
+    aes128_ctr_keystream_block(tls.skey, zero, outb);
+    for (int i = 0; i < 16; i++)
+      h[i] = outb[i];
+  }
+  for (int i = 0; i < 12; i++)
+    j0[i] = nonce[i];
+  j0[15] = 1;
+  aes128_ctr_keystream_block(tls.skey, j0, ek);
+  for (int i = 0; i < 16; i++)
+    y[i] = 0;
+  /* GHASH over AAD || C || lengths (see aes128gcm_encrypt for why the
+   * trailing-block padding isn't done separately: ghash_update() already
+   * zero-pads a partial final block in one gf128_mul). The AAD was being
+   * built above but never actually mixed into the tag here — every
+   * decrypt was checking the tag as if aad_len were 0. */
+  const ghash_table_t *gt = ghash_table_for(h, GHASH_SLOT_DECRYPT);
+  ghash_update(y, gt, aad, 13);
+  ghash_update(y, gt, rec + 8, ctlen); /* ciphertext */
+  uint64_t ab = 13u * 8u;
+  uint64_t cb = (uint64_t)ctlen * 8u;
+  for (int i = 0; i < 8; i++) {
+    lens[i] = (uint8_t)(ab >> (56 - 8 * i));
+    lens[8 + i] = (uint8_t)(cb >> (56 - 8 * i));
+  }
+  ghash_update(y, gt, lens, 16);
+  for (int i = 0; i < 16; i++)
+    if ((uint8_t)(y[i] ^ ek[i]) != tag[i])
+      return -1; /* tag mismatch */
+
+  for (int i = 0; i < 16; i++)
+    ctr[i] = j0[i];
+  uint32_t off = 0;
+  while (off < ctlen) {
+    uint8_t ks[16];
+    ctr_inc(ctr);
+    aes128_ctr_keystream_block(tls.skey, ctr, ks);
+    uint32_t n = ctlen - off;
+    if (n > 16)
+      n = 16;
+    for (uint32_t i = 0; i < n; i++)
+      out[off + i] = rec[8 + off + i] ^ ks[i];
+    off += n;
+  }
+  tls.sseq++;
+  return ctlen;
+}
+
+/* ---- handshake messages ---- */
+
+static int build_client_hello(uint8_t *out, const char *host) {
+  int n = 0;
+  tls_random(tls.client_random, 32);
+  out[n++] = 0x03;
+  out[n++] = 0x03; /* TLS 1.2 in the handshake body */
+  for (int i = 0; i < 32; i++)
+    out[n++] = tls.client_random[i];
+  out[n++] = 0; /* session id len */
+  out[n++] = 0;
+  out[n++] = 2; /* cipher suites len */
+  out[n++] = 0xC0;
+  out[n++] = 0x2F; /* ECDHE-RSA-AES128-GCM-SHA256 */
+  out[n++] = 1; /* compression methods len */
+  out[n++] = 0; /* null */
+
+  /* extensions */
+  int ext_len = 0;
+  /* server_name */
+  int hlen = 0;
+  while (host[hlen])
+    hlen++;
+  /* server_name ext_data = list_len(2) + name_type(1) + hostname_len(2) +
+   * hostname (RFC 6066: HostName is opaque<1..2^16-1>, i.e. a 2-byte
+   * length prefix, not 1). */
+  ext_len += 4 + 2 + 1 + 2 + hlen; /* header + list_len + type + len + name */
+  ext_len += 4 + 2 + 2;     /* supported_groups */
+  ext_len += 4 + 1 + 1;     /* ec_point_formats */
+  ext_len += 4 + 2 + 2;     /* signature_algorithms (header + list_len + algo) */
+  put16(out + n, (uint16_t)ext_len);
+  n += 2;
+
+  put16(out + n, 0x0000); /* server_name */
+  put16(out + n + 2, (uint16_t)(hlen + 5)); /* ext_data length */
+  n += 4;
+  put16(out + n, (uint16_t)(hlen + 3)); /* server_name_list length */
+  n += 2;
+  out[n++] = 0; /* name_type: host_name */
+  put16(out + n, (uint16_t)hlen); /* HostName length (2 bytes) */
+  n += 2;
+  for (int i = 0; i < hlen; i++)
+    out[n++] = (uint8_t)host[i];
+
+  put16(out + n, 0x000A); /* supported_groups */
+  put16(out + n + 2, 4);  /* ext_data length: list_len(2) + one entry(2) */
+  put16(out + n + 4, 2);  /* named_curve_list length */
+  put16(out + n + 6, 0x001D); /* x25519 */
+  n += 8;
+
+  put16(out + n, 0x000B); /* ec_point_formats */
+  put16(out + n + 2, 2);  /* ext_data length: list_len(1) + one format(1) */
+  out[n + 4] = 1;         /* ec_point_format_list length */
+  out[n + 5] = 0;         /* uncompressed */
+  n += 6;
+
+  put16(out + n, 0x000D); /* signature_algorithms */
+  put16(out + n + 2, 4);  /* ext_data length: list_len(2) + one entry(2) */
+  put16(out + n + 4, 2);  /* supported_signature_algorithms list length */
+  put16(out + n + 6, 0x0401); /* rsa_pkcs1_sha256 */
+  n += 8;
+  return n;
+}
+
+/* send one handshake message (header + body), appending to transcript */
+static int send_hs(struct tcp_pcb *pcb, uint8_t type, const uint8_t *body,
+                   uint16_t len) {
+  uint8_t msg[1024];
+  msg[0] = type;
+  msg[1] = (uint8_t)(len >> 16);
+  msg[2] = (uint8_t)(len >> 8);
+  msg[3] = (uint8_t)len;
+  for (int i = 0; i < len; i++)
+    msg[4 + i] = body[i];
+  if (!hs_append(msg, (uint32_t)len + 4))
+    return 0;
+  return tls_send_record(pcb, 22, msg, (uint16_t)(len + 4));
+}
+
+/* process plaintext handshake records from the server */
+static void hs_server_msg(const uint8_t *msg, uint32_t len) {
+  if (len < 4)
+    return;
+  uint8_t type = msg[0];
+  uint32_t blen = ((uint32_t)msg[1] << 16) | ((uint32_t)msg[2] << 8) | msg[3];
+  const uint8_t *body = msg + 4;
+
+  if (type == 2 && blen >= 35) { /* ServerHello */
+    for (int i = 0; i < 32; i++)
+      tls.server_random[i] = body[2 + i];
+    /* cipher suite at 34..35 */
+  } else if (type == 12 && blen >= 36) { /* ServerKeyExchange */
+    if (body[0] == 3 && body[1] == 0 && body[2] == 0x1D &&
+        body[3] == 32) {
+      for (int i = 0; i < 32; i++)
+        tls.srv_point[i] = body[4 + i];
+    }
+  }
+  /* Certificate (11) and ServerHelloDone (14) need no parsing here */
+}
+
+/* drain and process complete records from pcb->app_rx_buf.
+ * mode 0: collect plaintext handshake until ServerHelloDone seen.
+ * mode 1: after our flight: expect CCS + encrypted Finished.
+ * mode 2: app data: decrypt app records into app_out.
+ * returns: 1 progress made this call, 0 none, -1 fatal (alert/tag). */
+static int tls_pump(struct tcp_pcb *pcb, int mode, uint8_t *app_out,
+                    uint32_t *app_len) {
+  (void)pcb;
+  uint16_t len = pcb->app_rx_len;
+  int progress = 0;
+  uint32_t off = 0;
+  while (off + 5 <= len) {
+    const uint8_t *r = pcb->app_rx_buf + off;
+    uint8_t type = r[0];
+    uint16_t rlen = (uint16_t)((r[3] << 8) | r[4]);
+    if (off + 5 + rlen > len)
+      break; /* incomplete record */
+    const uint8_t *body = r + 5;
+
+    if (type == 21) { /* alert */
+      uint8_t lvl = 0, desc = 0;
+      /* A plaintext alert (sent before the SENDER's own CCS) is exactly
+       * 2 bytes: level + description. A GCM-protected one carries the
+       * 8-byte explicit nonce and 16-byte tag around those same 2 bytes
+       * (rlen==26). tls.established only reflects *our* encrypt state,
+       * not the server's — using it here would misdecode an alert the
+       * server sends before its own CCS (still its cleartext epoch) as
+       * ciphertext, silently corrupting the real level/description into
+       * "0/0". rlen is the reliable signal for which epoch this record
+       * is actually in. */
+      if (rlen == 2) {
+        lvl = body[0];
+        desc = body[1];
+      } else {
+        uint8_t pt[16];
+        if (tls_gcm_open(21, body, rlen, pt) >= 2) {
+          lvl = pt[0];
+          desc = pt[1];
+        }
+      }
+      log_writestring("[TLS] alert: ");
+      log_write_u32(lvl);
+      log_putchar('/');
+      log_write_u32(desc);
+      log_putchar('\n');
+      return -1;
+    }
+    if (mode == 0 && type == 22) {
+      /* plaintext handshake records: walk messages */
+      uint32_t ho = 0;
+      while (ho + 4 <= rlen) {
+        const uint8_t *m = body + ho;
+        uint32_t ml = ((uint32_t)m[1] << 16) | ((uint32_t)m[2] << 8) | m[3];
+        if (ho + 4 + ml > rlen)
+          break;
+        hs_append(m, 4 + ml);
+        hs_server_msg(m, 4 + ml);
+        if (m[0] == 14) /* ServerHelloDone */
+          tls.finished_ok = 1; /* reuse flag as 'shd seen' */
+        ho += 4 + ml;
+        progress = 1;
+      }
+    } else if (mode == 1 && type == 20) {
+      progress = 1; /* ChangeCipherSpec */
+    } else if (mode == 1 && type == 22) {
+      /* encrypted Finished */
+      uint8_t pt[256];
+      int pl = tls_gcm_open(22, body, rlen, pt);
+      if (pl < 0) {
+        log_writestring("[TLS] server finished tag mismatch\n");
+        return -1;
+      }
+      if (pl >= 16 && pt[0] == 20) {
+        /* verify_data check */
+        uint8_t hash[32], vd[12];
+        sha256(tls.hs, tls.hs_len, hash);
+        tls_prf(tls.master, 48, "server finished", hash, 32, vd, 12);
+        int ok = 1;
+        for (int i = 0; i < 12; i++)
+          if (pt[4 + i] != vd[i])
+            ok = 0;
+        if (!ok) {
+          log_writestring("[TLS] server finished verify_data mismatch\n");
+          return -1;
+        }
+        tls.finished_ok = 1;
+        progress = 1;
+      }
+    } else if (mode == 2 && type == 23) {
+      if (app_out && app_len) {
+        uint32_t cap = TLS_APP_DATA_CAP;
+        /* Decrypt into a scratch buffer sized for the largest possible
+         * TLS 1.2 record (2^14 plaintext bytes) — servers commonly pack
+         * pages into max-size records, far bigger than our page cap.
+         * GCM needs the whole ciphertext to verify the tag regardless of
+         * how much plaintext we keep, so decrypt in full and copy only
+         * what still fits into app_out (a lynx-style pager only needs
+         * the page's head anyway; page_body itself is capped at
+         * PAGE_MAX). Previously, any record whose own ciphertext length
+         * exceeded the *entire* cap was skipped without decrypting —
+         * losing sync with the server's sequence numbers and silently
+         * dropping the whole page on sites that use max-size records
+         * (e.g. nginx defaults). */
+        static uint8_t scratch[16384];
+        int pl = tls_gcm_open(23, body, rlen, scratch);
+        if (pl < 0) {
+          log_writestring("[TLS] record tag mismatch (app data)\n");
+          return -1;
+        }
+        uint32_t room = (*app_len < cap) ? cap - *app_len : 0;
+        uint32_t take = (uint32_t)pl < room ? (uint32_t)pl : room;
+        for (uint32_t i = 0; i < take; i++)
+          app_out[*app_len + i] = scratch[i];
+        *app_len += take;
+        progress = 1;
+      }
+    } else if (mode == 2 && type == 22) {
+      /* session tickets etc. after handshake: decrypt and ignore */
+      uint8_t pt[256];
+      if (tls_gcm_open(22, body, rlen, pt) >= 0)
+        progress = 1;
+    }
+    off += 5 + rlen;
+  }
+  if (off > 0) {
+    /* consume processed bytes */
+    uint16_t remaining = (uint16_t)(pcb->app_rx_len - off);
+    for (uint16_t i = 0; i < remaining; i++)
+      pcb->app_rx_buf[i] = pcb->app_rx_buf[off + i];
+    pcb->app_rx_len = remaining;
+  }
+  return progress;
+}
+
+/* full handshake on an established TCP connection. 1 on success. */
+int tls_handshake(struct tcp_pcb *pcb, const char *host) {
+  hs_reset();
+  uint8_t hello[512];
+  int hlen = build_client_hello(hello, host);
+  if (!send_hs(pcb, 1, hello, (uint16_t)hlen)) {
+    log_writestring("[TLS] failed to send ClientHello\n");
+    return 0;
+  }
+
+  /* wait for ServerHelloDone */
+  uint32_t start = pit_ticks;
+  while ((pit_ticks - start) < 800u) {
+    int r = tls_pump(pcb, 0, 0, 0);
+    if (r < 0) {
+      log_writestring("[TLS] ClientHello rejected (alert above)\n");
+      return 0;
+    }
+    if (tls.finished_ok)
+      break;
+    sleep_ms(50);
+  }
+  if (!tls.finished_ok) {
+    log_writestring("[TLS] no ServerHelloDone (timeout)\n");
+    return 0;
+  }
+
+  /* client key exchange */
+  uint8_t priv[32], pub[32];
+  tls_random(priv, 32);
+  x25519_base(pub, priv);
+  /* ClientKeyExchange body (RFC 4492 5.7, ClientECDiffieHellmanPublic) is
+   * just an ECPoint: opaque<1..2^8-1>, i.e. a 1-byte length then the raw
+   * point. (ServerKeyExchange's ECParameters — curve_type + named_curve +
+   * point — is a different structure; don't reuse it here.) */
+  uint8_t cke[40];
+  cke[0] = 32;
+  for (int i = 0; i < 32; i++)
+    cke[1 + i] = pub[i];
+  if (!send_hs(pcb, 16, cke, 33)) {
+    log_writestring("[TLS] failed to send ClientKeyExchange\n");
+    return 0;
+  }
+  log_writestring("[TLS] sent ClientKeyExchange\n");
+
+  uint8_t shared[32];
+  x25519_scalarmult(shared, priv, tls.srv_point);
+
+  /* master secret + key block */
+  uint8_t ms_seed[64];
+  for (int i = 0; i < 32; i++) {
+    ms_seed[i] = tls.client_random[i];
+    ms_seed[32 + i] = tls.server_random[i];
+  }
+  tls_prf(shared, 32, "master secret", ms_seed, 64, tls.master, 48);
+  uint8_t kb_seed[64], keyblk[40];
+  for (int i = 0; i < 32; i++) {
+    kb_seed[i] = tls.server_random[i];
+    kb_seed[32 + i] = tls.client_random[i];
+  }
+  tls_prf(tls.master, 48, "key expansion", kb_seed, 64, keyblk, 40);
+  for (int i = 0; i < 16; i++) {
+    tls.ckey[i] = keyblk[i];
+    tls.skey[i] = keyblk[16 + i];
+  }
+  for (int i = 0; i < 4; i++) {
+    tls.civ[i] = keyblk[32 + i];
+    tls.siv[i] = keyblk[36 + i];
+  }
+
+  /* ChangeCipherSpec (plaintext) */
+  uint8_t ccs = 1;
+  if (!tls_send_record_raw(pcb, 20, &ccs, 1)) {
+    log_writestring("[TLS] failed to send ChangeCipherSpec\n");
+    return 0;
+  }
+  tls.established = 1;
+
+  /* Finished: hash transcript BEFORE appending it */
+  uint8_t hash[32], vd[12];
+  sha256(tls.hs, tls.hs_len, hash);
+  tls_prf(tls.master, 48, "client finished", hash, 32, vd, 12);
+  {
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < tls.hs_len; i++)
+      sum = sum * 131u + tls.hs[i];
+    log_writestring("[TLS] transcript hs_len=");
+    log_write_u32(tls.hs_len);
+    log_writestring(" checksum=");
+    log_write_u32(sum);
+    log_putchar('\n');
+  }
+  if (!send_hs(pcb, 20, vd, 12)) {
+    log_writestring("[TLS] failed to send client Finished\n");
+    return 0;
+  }
+  log_writestring("[TLS] sent client Finished, waiting for server...\n");
+
+  /* wait for server CCS + encrypted Finished */
+  tls.finished_ok = 0;
+  start = pit_ticks;
+  while ((pit_ticks - start) < 800u) {
+    int r = tls_pump(pcb, 1, 0, 0);
+    if (r < 0) {
+      log_writestring("[TLS] server Finished pump failed (alert/tag)\n");
+      return 0;
+    }
+    if (tls.finished_ok)
+      break;
+    sleep_ms(50);
+  }
+  if (!tls.finished_ok) {
+    log_writestring("[TLS] no server Finished (timeout)\n");
+    return 0;
+  }
+
+  log_writestring("[TLS] handshake complete\n");
+  return 1;
+}
+
+int tls_established(void) { return tls.established; }
+
+int tls_write(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
+  return tls_send_record(pcb, 23, data, len);
+}
+
+/* poll decrypted app data; returns decrypted bytes this call (or -1) */
+int tls_read(struct tcp_pcb *pcb, uint8_t *out, uint32_t *len) {
+  return tls_pump(pcb, 2, out, len);
 }

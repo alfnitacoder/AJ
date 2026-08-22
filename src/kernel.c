@@ -8335,15 +8335,38 @@ void kernel_main()
   }
 
   // Reliably clear BSS if not already cleared by kernel_entry (skip
-  // 0x51000-0xA0000 = disk cache)
+  // 0x51000-0xA0000 = disk cache). Use dword stores — byte loops stall hard
+  // under QEMU TCG once .bss grows past a few hundred KiB.
   extern uint8_t sbss[], ebss[];
 #define DISK_CACHE_START ((uint8_t *)0x51000u)
 #define DISK_CACHE_END ((uint8_t *)0xA0000u)
-  for (uint8_t *p = sbss; p < ebss; p++)
   {
-    if (p >= DISK_CACHE_START && p < DISK_CACHE_END)
-      continue;
-    *p = 0;
+    uint8_t *p = sbss;
+    uint8_t *end = ebss;
+    while (p < end && (((uint32_t)p & 3u) != 0))
+    {
+      if (!(p >= DISK_CACHE_START && p < DISK_CACHE_END))
+        *p = 0;
+      p++;
+    }
+    while (p + 4 <= end)
+    {
+      if (p >= DISK_CACHE_END || p + 4 <= DISK_CACHE_START)
+        *(uint32_t *)p = 0;
+      else
+      {
+        for (int i = 0; i < 4; i++)
+          if (!(p + i >= DISK_CACHE_START && p + i < DISK_CACHE_END))
+            p[i] = 0;
+      }
+      p += 4;
+    }
+    while (p < end)
+    {
+      if (!(p >= DISK_CACHE_START && p < DISK_CACHE_END))
+        *p = 0;
+      p++;
+    }
   }
 #undef DISK_CACHE_START
 #undef DISK_CACHE_END

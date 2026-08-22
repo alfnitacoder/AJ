@@ -2552,11 +2552,38 @@ static void aes128_encrypt_block(const uint8_t *round_keys, const uint8_t *in,
 }
 
 // One block of keystream (for debug): out = AES_Encrypt(key, ctr). ctr is not modified.
+//
+// Callers that CTR-encrypt/decrypt a multi-block buffer (src/tls.c's GCM
+// path, in particular) call this once per 16-byte block with the SAME key
+// each time — a 16KB TLS record is 1024 calls. Recomputing the key
+// schedule (11 round keys, each needing S-box lookups) on every one of
+// those calls when the key hasn't changed was the dominant cost measured
+// in real page fetches (a table-based GHASH barely moved the needle,
+// which was the tell that the bottleneck was here, not there). Caching
+// the schedule for the most-recently-used key turns the common case
+// (many calls in a row, same key) into a cheap 16-byte compare.
+static uint8_t aes128_ks_cache_key[16];
+static uint8_t aes128_ks_cache_rk[16 * (AES128_ROUNDS + 1)];
+static int aes128_ks_cache_valid = 0;
+
 void aes128_ctr_keystream_block(const uint8_t *key, const uint8_t *ctr, uint8_t *out)
 {
-  uint8_t round_keys[16 * (AES128_ROUNDS + 1)];
-  aes128_keyschedule(key, round_keys);
-  aes128_encrypt_block(round_keys, ctr, out);
+  int stale = !aes128_ks_cache_valid;
+  if (!stale) {
+    for (int i = 0; i < 16; i++) {
+      if (aes128_ks_cache_key[i] != key[i]) {
+        stale = 1;
+        break;
+      }
+    }
+  }
+  if (stale) {
+    aes128_keyschedule(key, aes128_ks_cache_rk);
+    for (int i = 0; i < 16; i++)
+      aes128_ks_cache_key[i] = key[i];
+    aes128_ks_cache_valid = 1;
+  }
+  aes128_encrypt_block(aes128_ks_cache_rk, ctr, out);
 }
 
 // CTR: encrypt ctr (16 bytes) with key, XOR into data (len bytes), then increment ctr (big-endian).
