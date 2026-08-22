@@ -52,6 +52,9 @@ static int n_lines = 0;
  * ready to feed straight back into the same fetch path. */
 static char link_url[LINKS_MAX][LINK_URL_MAX];
 static int n_links = 0;
+/* Which rendered line (index into `lines[]`) each link's [N] marker ends
+ * up on, so arrow-key selection can highlight it and scroll it into view. */
+static int link_line[LINKS_MAX];
 
 /* Where the current page came from, so relative hrefs can be resolved
  * against it. base_dir is the path's directory (through the last '/'). */
@@ -475,6 +478,8 @@ static void html_to_lines(void) {
           /* closing </a>: stamp the link number onto the word we were
            * building, e.g. "click here[3]", so it flows through the
            * normal word-wrap logic below like any other text. */
+          if (cur_link_num >= 1 && cur_link_num <= LINKS_MAX)
+            link_line[cur_link_num - 1] = n_lines;
           char mk[10];
           int ml = 0;
           mk[ml++] = '[';
@@ -611,11 +616,33 @@ static void html_to_lines(void) {
     push_line(line, llen);
 }
 
-static void browser_render(int scroll, const char *linknum_buf) {
+/* Highlight the row the currently-selected link is on (white background,
+ * black text — a brighter bar than editor.c's light-grey status bar, so
+ * it reads as a selection rather than a status line) by poking the VGA
+ * text buffer's attribute bytes directly — log_writestring() has no
+ * notion of color, so this runs as a second pass over whatever
+ * browser_render() already drew. Assumes the standard 80x25 text mode the
+ * rest of the console (and editor.c) assumes. */
+#define VGA_TEXT_WIDTH 80
+#define VGA_ATTR_SELECTED 0xF0 /* bg=white(15), fg=black(0) */
+static void highlight_selected_link(int scroll, int selected_link) {
+  if (selected_link < 0 || selected_link >= n_links)
+    return;
+  int line_idx = link_line[selected_link];
+  if (line_idx < scroll || line_idx >= scroll + VIEW_ROWS)
+    return; /* selection scrolled off-screen */
+  int row = 1 + (line_idx - scroll); /* row 0 is the header line */
+  uint8_t *vid = (uint8_t *)0xB8000;
+  for (int col = 0; col < VGA_TEXT_WIDTH; col++)
+    vid[(row * VGA_TEXT_WIDTH + col) * 2 + 1] = VGA_ATTR_SELECTED;
+}
+
+static void browser_render(int scroll, const char *linknum_buf,
+                           int selected_link) {
   terminal_clear();
   if (n_links > 0)
-    log_writestring(" AJOS browser - q: quit, up/down: scroll, "
-                    "type a link number + Enter to follow it\n");
+    log_writestring(" AJOS browser - q: quit, arrows: select link/scroll, "
+                    "Enter: go\n");
   else
     log_writestring(" AJOS browser - q: quit, up/down: scroll\n");
   for (int r = 0; r < VIEW_ROWS && scroll + r < n_lines; r++) {
@@ -623,6 +650,7 @@ static void browser_render(int scroll, const char *linknum_buf) {
     log_writestring(lines[scroll + r]);
     log_writestring("\n");
   }
+  highlight_selected_link(scroll, selected_link);
   log_writestring(" [");
   log_write_u32((uint32_t)(scroll + 1));
   log_writestring("-");
@@ -801,9 +829,27 @@ void cmd_browser(const char *args) {
     int linknum_len = 0;
     linknum_buf[0] = '\0';
     int follow_link = 0;
+    /* -1 = no link selected. Up/Down move this between links (when the
+     * page has any) instead of scrolling by a line; PageUp/PageDown and
+     * g/G still do plain scrolling regardless. */
+    int selected_link = -1;
+
+    /* Shared by both the arrow-selection path and Enter: point cur_url at
+     * link_url[idx] and arrange for the outer loop to re-fetch it. */
+#define GO_TO_LINK(idx)                                                     \
+  do {                                                                      \
+    int _i = 0;                                                            \
+    while (link_url[idx][_i] && _i < (int)sizeof(cur_url) - 1) {           \
+      cur_url[_i] = link_url[idx][_i];                                     \
+      _i++;                                                                \
+    }                                                                      \
+    cur_url[_i] = '\0';                                                    \
+    follow_link = 1;                                                       \
+  } while (0)
+
     for (;;) {
       if (need_render) {
-        browser_render(scroll, linknum_buf);
+        browser_render(scroll, linknum_buf, selected_link);
         need_render = 0;
       }
       int key = input_getkey();
@@ -830,16 +876,13 @@ void cmd_browser(const char *args) {
           linknum_len = 0;
           linknum_buf[0] = '\0';
           if (num >= 1 && num <= n_links) {
-            int i = 0;
-            while (link_url[num - 1][i] && i < (int)sizeof(cur_url) - 1) {
-              cur_url[i] = link_url[num - 1][i];
-              i++;
-            }
-            cur_url[i] = '\0';
-            follow_link = 1;
+            GO_TO_LINK(num - 1);
             break;
           }
           need_render = 1;
+        } else if (selected_link >= 0) {
+          GO_TO_LINK(selected_link);
+          break;
         }
         continue;
       }
@@ -850,6 +893,30 @@ void cmd_browser(const char *args) {
         linknum_len = 0;
         linknum_buf[0] = '\0';
         need_render = 1;
+      }
+      if (n_links > 0 && (key == KEY_UP || key == KEY_DOWN)) {
+        if (selected_link < 0)
+          selected_link = 0;
+        else if (key == KEY_DOWN) {
+          if (selected_link < n_links - 1)
+            selected_link++;
+        } else if (selected_link > 0) {
+          selected_link--;
+        }
+        int L = link_line[selected_link];
+        int ns = scroll;
+        if (L < scroll)
+          ns = L; /* moving up past the top: bring it to the top */
+        else if (L >= scroll + VIEW_ROWS)
+          ns = L - VIEW_ROWS + 1; /* moving down past the bottom: to the bottom */
+        if (ns > n_lines - VIEW_ROWS)
+          ns = n_lines - VIEW_ROWS;
+        if (ns < 0)
+          ns = 0;
+        scroll = ns;
+        need_render = 1; /* re-render regardless: the highlight moved even
+                          * when the scroll position didn't */
+        continue;
       }
       int ns = scroll;
       if (key == KEY_UP)
@@ -875,6 +942,7 @@ void cmd_browser(const char *args) {
         need_render = 1;
       }
     }
+#undef GO_TO_LINK
     if (!follow_link)
       break;
   }
