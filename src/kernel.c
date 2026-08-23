@@ -7086,6 +7086,211 @@ static void vfs_cmd_cat(const char *args)
   vfs_close(vfs_get_global(), fd);
 }
 
+/* install <file> <name> -- copies <file> to /opt/<name>.aj so it can be
+ * pulled into a script with `import "<name>"`. Thin wrapper around the
+ * existing cp command; no new copy logic needed. */
+static void cmd_install(const char *args)
+{
+  const char *s = skip_spaces(args);
+  if (*s == '\0')
+  {
+    log_writestring("Usage: install <file> <name>\n");
+    return;
+  }
+  char file[64];
+  int i = 0;
+  while (*s && *s != ' ' && i < (int)sizeof(file) - 1)
+    file[i++] = *s++;
+  file[i] = '\0';
+  s = skip_spaces(s);
+  if (*s == '\0')
+  {
+    log_writestring("Usage: install <file> <name>\n");
+    return;
+  }
+  char name[40];
+  i = 0;
+  while (*s && *s != ' ' && i < (int)sizeof(name) - 1)
+    name[i++] = *s++;
+  name[i] = '\0';
+
+  char cp_args[128];
+  int n = 0;
+  size_t flen = kstrlen(file);
+  for (size_t k = 0; k < flen && n < (int)sizeof(cp_args) - 1; k++)
+    cp_args[n++] = file[k];
+  if (n < (int)sizeof(cp_args) - 1)
+    cp_args[n++] = ' ';
+  const char *prefix = "/opt/";
+  for (const char *p = prefix; *p && n < (int)sizeof(cp_args) - 1; p++)
+    cp_args[n++] = *p;
+  size_t nlen = kstrlen(name);
+  for (size_t k = 0; k < nlen && n < (int)sizeof(cp_args) - 1; k++)
+    cp_args[n++] = name[k];
+  const char *suffix = ".aj";
+  for (const char *p = suffix; *p && n < (int)sizeof(cp_args) - 1; p++)
+    cp_args[n++] = *p;
+  cp_args[n] = '\0';
+
+  cmd_cp(cp_args);
+  log_writestring("Installed to /opt/");
+  log_writestring(name);
+  log_writestring(".aj\n");
+}
+
+#define AJLANG_MAX_IMPORTS 8
+#define AJLANG_IMPORT_NAME_MAX 32
+
+/* Scan a loaded, null-terminated AJLang script for own-line
+ * `import "name"` statements and splice each /opt/name.aj package's
+ * source before the main script text, blanking the import line itself
+ * (replaced with spaces, same length) so line numbers for the rest of
+ * the script are unaffected. The interpreter itself (ajlang_run) never
+ * learns imports happened -- it just sees one bigger flat script and
+ * registers every def in it during its normal first pass.
+ *
+ * v1 limitation, on purpose: only the top-level script may `import`;
+ * package files under /opt/ cannot import each other (no recursion or
+ * cycle handling here).
+ *
+ * Returns a newly kmalloc'd combined buffer (caller must kfree it) when
+ * one or more imports were found and loaded successfully. Returns NULL
+ * with *err left at 0 when the script has no import lines at all (caller
+ * keeps using its original buffer unchanged). Returns NULL with *err set
+ * to 1 when an import line was found but its package could not be loaded
+ * (an error has already been printed) -- caller should abort. */
+static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err)
+{
+  *err = 0;
+  char names[AJLANG_MAX_IMPORTS][AJLANG_IMPORT_NAME_MAX];
+  int nimports = 0;
+  int any = 0;
+
+  uint32_t i = 0;
+  while (i < src_len)
+  {
+    uint32_t line_start = i;
+    while (i < src_len && src[i] != '\n')
+      i++;
+    uint32_t line_end = i; /* exclusive: points at '\n' or src_len */
+
+    uint32_t j = line_start;
+    while (j < line_end && (src[j] == ' ' || src[j] == '\t'))
+      j++;
+    if (line_end - j >= 8 && src[j] == 'i' && src[j + 1] == 'm' &&
+        src[j + 2] == 'p' && src[j + 3] == 'o' && src[j + 4] == 'r' &&
+        src[j + 5] == 't' && (src[j + 6] == ' ' || src[j + 6] == '\t'))
+    {
+      uint32_t k = j + 6;
+      while (k < line_end && (src[k] == ' ' || src[k] == '\t'))
+        k++;
+      if (k < line_end && src[k] == '"')
+      {
+        k++;
+        char name[AJLANG_IMPORT_NAME_MAX];
+        int nlen = 0;
+        while (k < line_end && src[k] != '"' && nlen < AJLANG_IMPORT_NAME_MAX - 1)
+          name[nlen++] = (char)src[k++];
+        name[nlen] = '\0';
+        if (k < line_end && src[k] == '"')
+        {
+          for (uint32_t b = line_start; b < line_end; b++)
+            src[b] = ' ';
+          any = 1;
+          int dup = 0;
+          for (int m = 0; m < nimports; m++)
+            if (kstreq(names[m], name)) { dup = 1; break; }
+          if (!dup && nimports < AJLANG_MAX_IMPORTS)
+          {
+            kstrncpy(names[nimports], name, AJLANG_IMPORT_NAME_MAX - 1);
+            names[nimports][AJLANG_IMPORT_NAME_MAX - 1] = '\0';
+            nimports++;
+          }
+        }
+      }
+    }
+
+    if (i < src_len)
+      i++; /* skip '\n' */
+  }
+
+  if (!any || nimports == 0)
+    return 0;
+
+  uint8_t *pkg_bufs[AJLANG_MAX_IMPORTS];
+  uint32_t pkg_sizes[AJLANG_MAX_IMPORTS];
+  uint32_t total_pkg_size = 0;
+  int ok = 1;
+  for (int m = 0; m < nimports; m++)
+  {
+    pkg_bufs[m] = 0;
+    pkg_sizes[m] = 0;
+    char pkg_path[64];
+    size_t nlen = kstrlen(names[m]);
+    if (nlen + 9 >= sizeof(pkg_path)) /* "/opt/" + name + ".aj" + NUL */
+    {
+      ok = 0;
+      continue;
+    }
+    kstrncpy(pkg_path, "/opt/", sizeof(pkg_path) - 1);
+    size_t plen = kstrlen(pkg_path);
+    mem_copy((uint8_t *)pkg_path + plen, (const uint8_t *)names[m], (uint32_t)nlen);
+    plen += nlen;
+    pkg_path[plen] = '.';
+    pkg_path[plen + 1] = 'a';
+    pkg_path[plen + 2] = 'j';
+    pkg_path[plen + 3] = '\0';
+
+    uint8_t *pb = 0;
+    uint32_t psz = 0;
+    if (!fat12_read_file_to_ram(pkg_path, &pb, &psz))
+    {
+      log_writestring("ajlang: import not found: ");
+      log_writestring(names[m]);
+      log_putchar('\n');
+      ok = 0;
+      continue;
+    }
+    pkg_bufs[m] = pb;
+    pkg_sizes[m] = psz;
+    total_pkg_size += psz + 1; /* +1 for a separating newline */
+  }
+
+  if (!ok)
+  {
+    for (int m = 0; m < nimports; m++)
+      if (pkg_bufs[m])
+        kfree(pkg_bufs[m]);
+    *err = 1;
+    return 0;
+  }
+
+  uint32_t combined_size = total_pkg_size + src_len;
+  uint8_t *combined = (uint8_t *)kmalloc(combined_size + 1);
+  if (!combined)
+  {
+    for (int m = 0; m < nimports; m++)
+      kfree(pkg_bufs[m]);
+    log_writestring("ajlang: out of memory splicing imports\n");
+    *err = 1;
+    return 0;
+  }
+
+  uint32_t off = 0;
+  for (int m = 0; m < nimports; m++)
+  {
+    mem_copy(combined + off, pkg_bufs[m], pkg_sizes[m]);
+    off += pkg_sizes[m];
+    combined[off++] = '\n';
+    kfree(pkg_bufs[m]);
+  }
+  mem_copy(combined + off, src, src_len);
+  off += src_len;
+  combined[off] = '\0';
+
+  return combined;
+}
+
 static void vfs_cmd_ajlang(const char *args)
 {
   const char *path_arg = skip_spaces(args);
@@ -7173,6 +7378,19 @@ static void vfs_cmd_ajlang(const char *args)
     log_writestring("ajlang: empty file\n");
     kfree(buf);
     return;
+  }
+
+  int import_err = 0;
+  uint8_t *spliced = ajlang_splice_imports(buf, size, &import_err);
+  if (import_err)
+  {
+    kfree(buf);
+    return;
+  }
+  if (spliced)
+  {
+    kfree(buf);
+    buf = spliced;
   }
 
   if (!ajlang_run((const char *)buf))
@@ -7956,6 +8174,11 @@ static void shell_dispatch(const char *line)
     cmd_cp(fn);
     return;
   }
+  if (cmd_clean_len == 7 && kstrcmp_n(cmd_clean, "install", 7) == 0)
+  {
+    cmd_install(rest);
+    return;
+  }
   if (cmd_clean_len == 5 && kstrcmp_n(cmd_clean, "files", 5) == 0)
   {
     cmd_files();
@@ -8563,6 +8786,7 @@ void kernel_main()
   fat12_mkdir("var/log");
   fat12_mkdir("bin");
   fat12_mkdir("tmp");
+  fat12_mkdir("opt");
 
   /* Quiet the JSON debug event stream now that boot is done. */
   {

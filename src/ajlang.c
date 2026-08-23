@@ -7,6 +7,7 @@
 #include "ajlang.h"
 #include "kernel.h"
 #include "net.h"
+#include "fat.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +17,10 @@ extern void sleep_ms(uint32_t ms);
 extern volatile uint32_t pit_ticks;
 extern volatile int dns_got_reply;
 extern volatile uint32_t dns_last_ip;
+extern void *kmalloc(uint32_t size);
+extern void kfree(void *ptr);
+extern void editor_open(const char *filename);
+extern size_t kstrlen(const char *s);
 
 #ifndef AJLANG_PIT_HZ
 #define AJLANG_PIT_HZ 100u
@@ -74,6 +79,215 @@ static int builtin_dns_lookup(const char *name, char *out, int maxlen)
   return 0;
 }
 
+/* Read a file's content into a caller-provided, size-limited string buffer.
+ * Silently truncates -- every AJLang string is capped at STR_BUF_SIZE, so
+ * there's no way to signal "too big" other than a script noticing the
+ * result got cut off. Tries the RAM file-slot cache first (same order
+ * `cat`/`ajlang` itself use), then disk. */
+static void builtin_file_read(const char *path, char *out, int maxlen) {
+  out[0] = 0;
+  if (!path || !path[0])
+    return;
+  uint8_t *buf = 0;
+  uint32_t size = 0;
+  int loaded = (file_slot_read(path, &buf, &size) == 1) ||
+              fat12_read_file_to_ram(path, &buf, &size);
+  if (!loaded)
+    return;
+  int n = (int)size;
+  if (n > maxlen - 1)
+    n = maxlen - 1;
+  if (n > 0)
+    mem_copy(out, buf, (size_t)n);
+  out[n > 0 ? n : 0] = 0;
+  kfree(buf);
+}
+
+/* Write a string to a file (overwriting it). Returns 1/0. */
+static int builtin_file_write(const char *path, const char *content) {
+  if (!path || !path[0])
+    return 0;
+  size_t len = kstrlen(content);
+  return fat12_write_file(path, (const uint8_t *)content, (uint32_t)len);
+}
+
+/* Index of the first occurrence of needle in haystack, or -1. */
+static int64_t builtin_str_find(const char *haystack, const char *needle) {
+  if (!haystack || !needle || !needle[0])
+    return -1;
+  int hn = 0;
+  while (haystack[hn]) hn++;
+  int nn = 0;
+  while (needle[nn]) nn++;
+  for (int i = 0; i + nn <= hn; i++) {
+    int j = 0;
+    while (j < nn && haystack[i + j] == needle[j]) j++;
+    if (j == nn) return i;
+  }
+  return -1;
+}
+
+/* out = s[start .. start+len), clamped to s's actual bounds and maxlen. */
+static void builtin_str_sub(const char *s, int64_t start, int64_t len,
+                            char *out, int maxlen) {
+  out[0] = 0;
+  if (!s)
+    return;
+  int64_t slen = 0;
+  while (s[slen]) slen++;
+  if (start < 0) start = 0;
+  if (start > slen) start = slen;
+  int64_t avail = slen - start;
+  if (len < 0 || len > avail) len = avail;
+  if (len > maxlen - 1) len = maxlen - 1;
+  int64_t i = 0;
+  while (i < len) { out[i] = s[start + i]; i++; }
+  out[i] = 0;
+}
+
+/* Parse "http://host[:port]/path" (or bare "host[:port]/path", defaulting
+ * to http). No frills -- this is a small utility fetch, not the browser. */
+static void parse_http_url(const char *url, char *host, int host_max,
+                           uint16_t *port, char *path_buf, int path_max) {
+  const char *s = url ? url : "";
+  if (s[0] == 'h' && s[1] == 't' && s[2] == 't' && s[3] == 'p' && s[4] == ':' &&
+      s[5] == '/' && s[6] == '/')
+    s += 7;
+  int hi = 0;
+  *port = 80;
+  while (*s && *s != '/' && *s != ':' && hi < host_max - 1)
+    host[hi++] = *s++;
+  host[hi] = 0;
+  if (*s == ':') {
+    s++;
+    uint32_t p = 0;
+    while (*s >= '0' && *s <= '9') { p = p * 10 + (uint32_t)(*s - '0'); s++; }
+    if (p > 0 && p < 65536)
+      *port = (uint16_t)p;
+  }
+  int pi = 0;
+  if (*s == '/') {
+    while (*s && pi < path_max - 1) path_buf[pi++] = *s++;
+  }
+  path_buf[pi] = 0;
+  if (pi == 0) { path_buf[0] = '/'; path_buf[1] = 0; }
+}
+
+/* Fetch url over plain HTTP (no TLS -- see the plan doc for why). If
+ * save_path is set, the full response body is written there via
+ * fat12_write_file and out is left untouched by the body; otherwise the
+ * body (truncated to maxlen-1) is copied into out. Returns 1/0.
+ * Structurally the same connect/GET/wait-for-response flow as
+ * cmd_http_get in kernel.c, restructured to return data instead of
+ * printing it. */
+static int builtin_http_fetch(const char *url, char *out, int maxlen,
+                              const char *save_path) {
+  if (out)
+    out[0] = 0;
+  char host[64];
+  char path[160];
+  uint16_t port;
+  parse_http_url(url, host, sizeof(host), &port, path, sizeof(path));
+  if (!host[0])
+    return 0;
+
+  dns_lookup(host);
+  uint32_t start = pit_ticks;
+  while (!dns_got_reply && (pit_ticks - start) < AJLANG_PIT_HZ * 4u)
+    sleep_ms(50);
+  if (!dns_got_reply || dns_last_ip == 0)
+    return 0;
+  uint32_t ip = dns_last_ip;
+
+  struct tcp_pcb *pcb = tcp_get_free_pcb();
+  if (!pcb)
+    return 0;
+
+  int connected = 0;
+  for (int attempt = 0; attempt < 2 && !connected; attempt++) {
+    tcp_connect(pcb, ip, port);
+    start = pit_ticks;
+    while ((pit_ticks - start) < AJLANG_PIT_HZ * 6u) {
+      if (pcb->state == TCP_ESTABLISHED) { connected = 1; break; }
+      if (pcb->state == TCP_CLOSED) break;
+      sleep_ms(50);
+    }
+    if (!connected) { pcb->state = TCP_CLOSED; sleep_ms(100); }
+  }
+  if (!connected)
+    return 0;
+
+  pcb->app_rx_len = 0;
+  char req[256];
+  int n = 0;
+  const char *parts[] = {"GET ", path, " HTTP/1.0\r\nHost: ", host,
+                         "\r\nUser-Agent: AJLang/1.0\r\n\r\n"};
+  for (int i = 0; i < 5 && n < (int)sizeof(req) - 1; i++)
+    for (int j = 0; parts[i][j] && n < (int)sizeof(req) - 1; j++)
+      req[n++] = parts[i][j];
+  tcp_send(pcb, (const uint8_t *)req, (uint16_t)n);
+
+  int found_header_end = 0;
+  uint16_t last_len = 0;
+  uint32_t stable_since = 0;
+  start = pit_ticks;
+  while ((pit_ticks - start) < AJLANG_PIT_HZ * 10u) {
+    sleep_ms(100);
+    uint16_t len = pcb->app_rx_len;
+    if (!found_header_end) {
+      for (uint16_t i = 0; (uint32_t)i + 3 < len; i++) {
+        if (pcb->app_rx_buf[i] == '\r' && pcb->app_rx_buf[i + 1] == '\n' &&
+            pcb->app_rx_buf[i + 2] == '\r' && pcb->app_rx_buf[i + 3] == '\n') {
+          found_header_end = 1;
+          break;
+        }
+      }
+    }
+    if (found_header_end) {
+      if (pcb->state == TCP_CLOSE_WAIT || pcb->state == TCP_CLOSED ||
+          pcb->state == TCP_CLOSING)
+        break;
+      if (len == last_len) {
+        if (stable_since == 0) stable_since = pit_ticks;
+        else if ((pit_ticks - stable_since) > 250u) break;
+      } else {
+        stable_since = 0;
+        last_len = len;
+      }
+      if (len >= TCP_APP_RX_MAX - 64)
+        break;
+    }
+  }
+
+  if (!found_header_end || pcb->app_rx_len == 0) {
+    tcp_close(pcb);
+    return 0;
+  }
+
+  uint16_t hdr_end = 0;
+  for (uint16_t i = 0; (uint32_t)i + 3 < pcb->app_rx_len; i++) {
+    if (pcb->app_rx_buf[i] == '\r' && pcb->app_rx_buf[i + 1] == '\n' &&
+        pcb->app_rx_buf[i + 2] == '\r' && pcb->app_rx_buf[i + 3] == '\n') {
+      hdr_end = (uint16_t)(i + 4);
+      break;
+    }
+  }
+
+  int ok;
+  if (save_path && save_path[0]) {
+    ok = fat12_write_file(save_path, pcb->app_rx_buf + hdr_end,
+                          (uint32_t)(pcb->app_rx_len - hdr_end));
+  } else {
+    int n2 = (int)(pcb->app_rx_len - hdr_end);
+    if (n2 > maxlen - 1) n2 = maxlen - 1;
+    if (n2 > 0) mem_copy(out, pcb->app_rx_buf + hdr_end, (size_t)n2);
+    out[n2 > 0 ? n2 : 0] = 0;
+    ok = 1;
+  }
+  tcp_close(pcb);
+  return ok;
+}
+
 #define TOK_EOF      0
 #define TOK_NUMBER   1
 #define TOK_STRING   2
@@ -114,10 +328,14 @@ static int builtin_dns_lookup(const char *name, char *out, int maxlen)
 #define TOK_COMMA   37
 #define TOK_NEWLINE 38
 
-#define MAX_TOKENS   512
+/* MAX_TOKENS/MAX_FUNCS sized for a main script plus a handful of imported
+ * /opt/*.aj packages spliced into the same source before lexing (see
+ * vfs_cmd_ajlang in kernel.c) -- each package adds its own def bodies to
+ * this one flat token stream and function table. */
+#define MAX_TOKENS   1536
 #define MAX_IDENT    32
 #define MAX_VARS     64
-#define MAX_FUNCS    16
+#define MAX_FUNCS    32
 #define MAX_PARAMS   8
 #define MAX_BODY     64
 #define STR_BUF_SIZE 256
@@ -398,6 +616,12 @@ static void parse_expr(int *out_is_num, int64_t *out_num, char *out_str, int max
 
 static void eval_expr(int *out_is_num, int64_t *out_num, char *out_str, int maxlen);
 
+/* run_statement is the complete statement executor (print/let/if/while/
+ * for/def/return, correctly handling nesting) -- defined further down,
+ * used here so a function call's body runs through the exact same logic
+ * as the top-level program instead of a separate, more limited copy. */
+static void run_statement(void);
+
 static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int maxlen) {
   struct Token *t = advance_tok();
   if (t->type == TOK_NUMBER) {
@@ -431,28 +655,84 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
   if (t->type == TOK_IDENT) {
     if (peek_tok()->type == TOK_LPAREN) {
       advance_tok();
-      /* Builtin: dns(hostname) -> dotted IPv4 string, or "" on failure */
-      if (t->str_val[0] == 'd' && t->str_val[1] == 'n' && t->str_val[2] == 's' &&
-          t->str_val[3] == 0)
-      {
-        int arg_is_num;
-        int64_t arg_num;
-        char arg_str[STR_BUF_SIZE];
-        arg_str[0] = 0;
-        if (peek_tok()->type != TOK_RPAREN)
-          eval_expr(&arg_is_num, &arg_num, arg_str, STR_BUF_SIZE);
-        if (peek_tok()->type == TOK_RPAREN)
-          advance_tok();
-        *out_is_num = 0;
-        *out_num = 0;
-        out_str[0] = 0;
+      /* Collect args once, generically, then dispatch to either a native
+       * builtin (by name) or a user-defined function using the same arg
+       * data -- avoids every builtin re-implementing its own 1-off arg
+       * parsing the way the original dns()-only version did. */
+      int args_is_num[MAX_PARAMS];
+      int64_t args_num[MAX_PARAMS];
+      char args_str[MAX_PARAMS][STR_BUF_SIZE];
+      int nargs = 0;
+      while (peek_tok()->type != TOK_RPAREN && nargs < MAX_PARAMS) {
+        args_str[nargs][0] = 0;
+        eval_expr(&args_is_num[nargs], &args_num[nargs], args_str[nargs], STR_BUF_SIZE);
+        nargs++;
+        if (peek_tok()->type == TOK_COMMA) advance_tok();
+      }
+      if (peek_tok()->type == TOK_RPAREN) advance_tok();
+
+#define ARG_STR(i) (((i) < nargs && !args_is_num[i]) ? args_str[i] : "")
+#define ARG_NUM(i) ((i) < nargs ? args_num[i] : 0)
+
+      /* Builtins -- see docs/AJLANG.md. All native capability packages
+       * under /opt/ (http, db, editor) are built on these. */
+      if (kstrcmp_n(t->str_val, "dns", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
         if (!g_define_pass)
-        {
-          const char *host = arg_is_num ? "" : arg_str;
-          builtin_dns_lookup(host, out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE);
+          builtin_dns_lookup(ARG_STR(0), out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "file_read", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+          builtin_file_read(ARG_STR(0), out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "file_write", MAX_IDENT) == 0) {
+        *out_is_num = 1; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+          *out_num = builtin_file_write(ARG_STR(0), ARG_STR(1)) ? 1 : 0;
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "http_get", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+          builtin_http_fetch(ARG_STR(0), out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE, 0);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "http_get_save", MAX_IDENT) == 0) {
+        *out_is_num = 1; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass) {
+          char tmp[STR_BUF_SIZE];
+          *out_num = builtin_http_fetch(ARG_STR(0), tmp, STR_BUF_SIZE, ARG_STR(1)) ? 1 : 0;
         }
         return;
       }
+      if (kstrcmp_n(t->str_val, "str_len", MAX_IDENT) == 0) {
+        *out_is_num = 1; out_str[0] = 0;
+        *out_num = (int64_t)kstrlen(ARG_STR(0));
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "str_find", MAX_IDENT) == 0) {
+        *out_is_num = 1; out_str[0] = 0;
+        *out_num = builtin_str_find(ARG_STR(0), ARG_STR(1));
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "str_sub", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        builtin_str_sub(ARG_STR(0), ARG_NUM(1), ARG_NUM(2), out_str,
+                        maxlen > 0 ? maxlen : STR_BUF_SIZE);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "edit", MAX_IDENT) == 0) {
+        *out_is_num = 1; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass && ARG_STR(0)[0])
+          editor_open(ARG_STR(0));
+        return;
+      }
+#undef ARG_STR
+#undef ARG_NUM
+
       struct Func *f = find_func(t->str_val);
       if (!f) {
         log_writestring("ajlang: undefined function ");
@@ -462,16 +742,6 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
         *out_num = 0;
         return;
       }
-      int args_is_num[MAX_PARAMS];
-      int64_t args_num[MAX_PARAMS];
-      char args_str[MAX_PARAMS][STR_BUF_SIZE];
-      int nargs = 0;
-      while (peek_tok()->type != TOK_RPAREN && nargs < MAX_PARAMS) {
-        eval_expr(&args_is_num[nargs], &args_num[nargs], args_str[nargs], STR_BUF_SIZE);
-        nargs++;
-        if (peek_tok()->type == TOK_COMMA) advance_tok();
-      }
-      if (peek_tok()->type == TOK_RPAREN) advance_tok();
       if (g_define_pass) {
         /* Define pass only registers defs; do not execute calls. */
         *out_is_num = 1;
@@ -499,103 +769,20 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
           pv->str_val[j] = 0;
         }
       }
+      /* Run the body through the same statement executor used for the
+       * top-level program (and for while/for loop bodies) instead of a
+       * separate hand-rolled copy -- the old copy only understood
+       * print/let/if(print|let only) and silently mis-executed anything
+       * else (while, for, nested if, return nested inside if), which
+       * broke ordinary recursive functions and any loop written inside a
+       * def. run_statement() already knows how to skip a whole nested
+       * block in one call (see is_block_open_tok), so one call per
+       * top-level body statement is correct here. */
       g_tok_pos = f->body_start;
       while (g_tok_pos < f->body_start + f->body_len && !g_return_flag) {
-        int d1, d2; int64_t d3; char d4[STR_BUF_SIZE];
-        if (peek_tok()->type == TOK_EOF || peek_tok()->type == TOK_END) break;
-        if (peek_tok()->type == TOK_PRINT) {
-          advance_tok();
-          eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-          if (d1) { log_write_u32((uint32_t)d3); log_putchar('\n'); }
-          else { log_writestring(d4); log_putchar('\n'); }
-        } else if (peek_tok()->type == TOK_LET) {
-          advance_tok();
-          struct Token *tn = advance_tok();
-          if (tn->type != TOK_IDENT) break;
-          advance_tok();
-          eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-          struct Var *v = get_or_add_var(tn->str_val);
-          if (v) { v->is_num = d1; v->num_val = d3; mem_copy(v->str_val, d4, STR_BUF_SIZE); }
-        } else if (peek_tok()->type == TOK_IF) {
-          advance_tok();
-          eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-          int cond = is_truthy(d1, d3, d4);
-          advance_tok();
-          int depth = 1;
-          int then_len = 0;
-          while (depth > 0 && g_tok_pos < g_ntokens) {
-            if (g_tokens[g_tok_pos].type == TOK_IF) depth++;
-            else if (g_tokens[g_tok_pos].type == TOK_END) { depth--; if (depth == 0) break; }
-            else if (g_tokens[g_tok_pos].type == TOK_ELSE && depth == 1) break;
-            then_len++;
-            g_tok_pos++;
-          }
-          int saved = g_tok_pos;
-          if (cond) {
-            g_tok_pos = saved - then_len;
-            for (int k = 0; k < then_len; k++) {
-              if (g_tokens[g_tok_pos].type == TOK_PRINT) {
-                g_tok_pos++;
-                eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-                if (d1) { log_write_u32((uint32_t)d3); log_putchar('\n'); }
-                else { log_writestring(d4); log_putchar('\n'); }
-              } else if (g_tokens[g_tok_pos].type == TOK_LET) {
-                g_tok_pos++;
-                struct Token *tn2 = &g_tokens[g_tok_pos++];
-                g_tok_pos++;
-                eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-                struct Var *v = get_or_add_var(tn2->str_val);
-                if (v) { v->is_num = d1; v->num_val = d3; mem_copy(v->str_val, d4, STR_BUF_SIZE); }
-              } else g_tok_pos++;
-            }
-          }
-          while (g_tok_pos < g_ntokens && (g_tokens[g_tok_pos].type != TOK_ELSE || depth != 1))
-            g_tok_pos++;
-          if (g_tokens[g_tok_pos].type == TOK_ELSE && depth == 1) {
-            g_tok_pos++;
-            int else_len = 0;
-            depth = 1;
-            while (depth > 0 && g_tok_pos < g_ntokens) {
-              if (g_tokens[g_tok_pos].type == TOK_IF) depth++;
-              else if (g_tokens[g_tok_pos].type == TOK_END) { depth--; if (depth == 0) break; }
-              else_len++;
-              g_tok_pos++;
-            }
-            if (!cond) {
-              g_tok_pos = g_tok_pos - else_len;
-              for (int k = 0; k < else_len; k++) {
-                if (g_tokens[g_tok_pos].type == TOK_PRINT) {
-                  g_tok_pos++;
-                  eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-                  if (d1) { log_write_u32((uint32_t)d3); log_putchar('\n'); }
-                  else { log_writestring(d4); log_putchar('\n'); }
-                } else if (g_tokens[g_tok_pos].type == TOK_LET) {
-                  g_tok_pos++;
-                  struct Token *tn2 = &g_tokens[g_tok_pos++];
-                  g_tok_pos++;
-                  eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-                  struct Var *v = get_or_add_var(tn2->str_val);
-                  if (v) { v->is_num = d1; v->num_val = d3; mem_copy(v->str_val, d4, STR_BUF_SIZE); }
-                } else g_tok_pos++;
-              }
-            }
-          }
-          while (g_tok_pos < g_ntokens && g_tokens[g_tok_pos].type != TOK_END) g_tok_pos++;
-          if (g_tok_pos < g_ntokens) g_tok_pos++;
-        } else if (peek_tok()->type == TOK_RETURN) {
-          advance_tok();
-          if (peek_tok()->type != TOK_NEWLINE && peek_tok()->type != TOK_END && peek_tok()->type != TOK_EOF) {
-            eval_expr(&g_return_is_str, &g_return_val, g_return_str, STR_BUF_SIZE);
-            g_return_is_str = !g_return_is_str;
-          } else {
-            g_return_is_str = 1;
-            g_return_val = 0;
-            g_return_str[0] = 0;
-          }
-          g_return_flag = 1;
-        } else {
-          eval_expr(&d1, &d3, d4, STR_BUF_SIZE);
-        }
+        if (peek_tok()->type == TOK_EOF)
+          break;
+        run_statement();
       }
       g_tok_pos = old_pos;
       *out_is_num = !g_return_is_str;  /* g_return_is_str=1 means string, so out_is_num=0 */
@@ -885,36 +1072,44 @@ static void run_statement(void) {
       else if (g_tokens[then_end].type == TOK_ELSE && depth == 1) break;
       then_end++;
     }
+    int has_else = (then_end < g_ntokens && g_tokens[then_end].type == TOK_ELSE);
     int else_start = then_end;
-    if (g_tokens[then_end].type == TOK_ELSE) {
+    /* end_pos is the position of the TOK_END matching *this* if/else,
+     * regardless of nesting inside either branch -- used below to resume
+     * after whichever branch ran. Previously this was guessed as
+     * `cond ? then_end : g_ntokens`, which pointed past the entire rest
+     * of the program (g_ntokens) for every false-with-no-else condition,
+     * silently truncating execution (e.g. any `if x > 1 then ... end`
+     * with no else, once false, looked like the end of the program to
+     * whatever was running it -- a script, a loop body, or a function
+     * body, cutting off everything after it). */
+    int end_pos = then_end;
+    if (has_else) {
       else_start++;
       depth = 1;
-      while (depth > 0 && else_start < g_ntokens) {
-        if (g_tokens[else_start].type == TOK_IF) depth++;
-        else if (g_tokens[else_start].type == TOK_END) { depth--; if (depth == 0) break; }
-        else_start++;
+      end_pos = else_start;
+      while (depth > 0 && end_pos < g_ntokens) {
+        if (g_tokens[end_pos].type == TOK_IF) depth++;
+        else if (g_tokens[end_pos].type == TOK_END) { depth--; if (depth == 0) break; }
+        end_pos++;
       }
     }
     int saved_pos = g_tok_pos;
     if (g_define_pass) {
       g_tok_pos = saved_pos;
       while (g_tok_pos < then_end) run_statement();
-      if (g_tokens[then_end].type == TOK_ELSE) {
+      if (has_else) {
         g_tok_pos = else_start;
-        while (g_tok_pos < g_ntokens && g_tokens[g_tok_pos].type != TOK_END)
-          run_statement();
+        while (g_tok_pos < end_pos) run_statement();
       }
-      g_tok_pos = then_end;
     } else if (cond) {
-      while (g_tok_pos < then_end) run_statement();
-    } else if (g_tokens[then_end].type == TOK_ELSE) {
+      while (g_tok_pos < then_end && !g_return_flag) run_statement();
+    } else if (has_else) {
       g_tok_pos = else_start;
-      while (g_tok_pos < g_ntokens && g_tokens[g_tok_pos].type != TOK_END)
-        run_statement();
+      while (g_tok_pos < end_pos && !g_return_flag) run_statement();
     }
-    if (!g_define_pass) g_tok_pos = (cond ? then_end : g_ntokens);
-    while (g_tok_pos < g_ntokens && g_tokens[g_tok_pos].type != TOK_END) g_tok_pos++;
-    if (g_tok_pos < g_ntokens) g_tok_pos++;
+    g_tok_pos = end_pos;
+    if (g_tok_pos < g_ntokens) g_tok_pos++; /* consume the matching END */
     return;
   }
   if (peek_tok()->type == TOK_WHILE) {
@@ -947,6 +1142,14 @@ static void run_statement(void) {
         }
       }
     }
+    /* The loop above always leaves g_tok_pos wherever the *last*
+     * condition re-check stopped (mid-expression, not at body_end) once
+     * the condition finally comes back false -- re-pin it to just past
+     * this while block's own END so whoever called us (the top-level
+     * driver, an enclosing loop, or a function body) resumes at the
+     * *next* statement instead of replaying the tail of this loop's body
+     * as if it were fresh code. */
+    g_tok_pos = body_end + 1;
     return;
   }
   if (peek_tok()->type == TOK_FOR) {
@@ -983,6 +1186,9 @@ static void run_statement(void) {
         }
       }
     }
+    /* Same repositioning as the while-loop case above: after the last
+     * iteration's body runs, g_tok_pos sits at body_end (not past it). */
+    g_tok_pos = body_end + 1;
     return;
   }
   if (peek_tok()->type == TOK_DEF) {
@@ -1037,8 +1243,23 @@ static void run_statement(void) {
   if (peek_tok()->type == TOK_RETURN) {
     advance_tok();
     if (peek_tok()->type != TOK_NEWLINE && peek_tok()->type != TOK_END && peek_tok()->type != TOK_EOF) {
-      eval_expr(&g_return_is_str, &g_return_val, g_return_str, STR_BUF_SIZE);
-      g_return_is_str = !g_return_is_str;
+      /* Evaluate into locals, not directly into g_return_val/g_return_str:
+       * eval_expr recurses through parse_factor's left-operand accumulator
+       * (e.g. the `n` in `n * factorial(n - 1)`), which stays live in that
+       * accumulator while the right-hand side is evaluated. If the
+       * accumulator were g_return_val itself, a nested call's own `return`
+       * (factorial's recursive call) would overwrite it mid-expression,
+       * before this level's multiplication ever reads it back -- silently
+       * corrupting any recursive function that uses its own call in an
+       * expression (which is most of them). Only publish to the globals
+       * once the whole expression is fully evaluated. */
+      int ret_is_num;
+      int64_t ret_num;
+      char ret_str[STR_BUF_SIZE];
+      eval_expr(&ret_is_num, &ret_num, ret_str, STR_BUF_SIZE);
+      g_return_is_str = !ret_is_num;
+      g_return_val = ret_num;
+      mem_copy(g_return_str, ret_str, STR_BUF_SIZE);
     } else {
       g_return_is_str = 1;
       g_return_val = 0;

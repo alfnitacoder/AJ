@@ -308,9 +308,9 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
             img[base + o:base + o + 32] = e
             o += 32
 
-    def add_system_dirs() -> int:
+    def add_system_dirs() -> tuple[int, int]:
         """Linux-style system directories baked into every image. Returns
-        the var/www cluster for web content."""
+        (var/www cluster, opt cluster) for web content and packages."""
         etc_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"ETC        ", 0x10, etc_c))
         var_c = alloc_dir_cluster(0)
@@ -326,7 +326,9 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         add_root_entry_raw(dir_entry_83(b"BIN        ", 0x10, bin_c))
         tmp_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"TMP        ", 0x10, tmp_c))
-        return www_c
+        opt_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"OPT        ", 0x10, opt_c))
+        return www_c, opt_c
 
     def add_root_entry_raw(entry: bytes) -> None:
         nonlocal root_idx
@@ -358,7 +360,7 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         first_cluster, size = alloc_file(f.data, f.name)
         add_root_entry(f.name, 0x20, first_cluster, size)
 
-    www_cluster = add_system_dirs()
+    www_cluster, opt_cluster = add_system_dirs()
 
     # Web root: repo www/*.html -> var/www/ in the image
     from pathlib import Path as _P
@@ -366,6 +368,13 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         for wf in sorted(_P("www").iterdir()):
             if wf.is_file():
                 add_dir_file(www_cluster, wf.name, wf.read_bytes())
+
+    # AJLang packages: repo opt/*.aj -> /opt/ in the image, installable via
+    # `import "name"` from any .aj script (see src/kernel.c vfs_cmd_ajlang).
+    if _P("opt").is_dir():
+        for pf in sorted(_P("opt").iterdir()):
+            if pf.is_file() and pf.suffix == ".aj":
+                add_dir_file(opt_cluster, pf.name, pf.read_bytes())
 
     img[fat1_lba * SECTOR_SIZE:(fat1_lba + sectors_per_fat) * SECTOR_SIZE] = fat
     img[fat2_lba * SECTOR_SIZE:(fat2_lba + sectors_per_fat) * SECTOR_SIZE] = fat
