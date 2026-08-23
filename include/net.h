@@ -145,18 +145,24 @@ struct tcp_pcb {
   // for more bytes that already arrived (seen live against nginx sites
   // serving pages > 16KB, e.g. wantok.vu).
   //
-  // Tried sizing this for several records at once (so a fetch needs fewer
-  // window-reopen round trips) and it made things worse instead of
-  // better — a live page fetch that reliably completed at this size (one
-  // record's worth) came back nearly empty at 3x the size, and there
-  // wasn't time left in the session to safely chase down why before
-  // shipping. Left at the size proven to work end-to-end. If revisiting
-  // this: the wire window field is 16 bits and app_rx_len below is itself
-  // a uint16_t, so anything from here up to 65535 is representable, but a
-  // buffer size that's an exact multiple of 65536 truncates the
-  // *advertised window* to zero, not merely a small one — caught live
-  // going straight from 16640 to 131072.
-#define TCP_APP_RX_MAX 16640
+  // Sized for 3 records at once (not just 1) so a big page needs a third
+  // as many window-reopen round trips through QEMU's slirp NAT, which
+  // measured a consistent ~5s tax per reopen against a real site at the
+  // 1-record size. Confirmed live, repeatedly: a 261KB page (17 records)
+  // that took ~81s at 16640 completed in ~2.8s at this size — a bigger
+  // win than the naive "3x fewer reopens" math suggests, so there's
+  // likely a threshold in slirp's own forwarding behavior beyond just
+  // linear round-trip counting. (An earlier attempt at this same change
+  // was reverted after one bad test run; in hindsight that was most
+  // likely a one-off against a real-world link with measured packet loss
+  // — ~20% in a ping sample — not a bug in the larger buffer itself.)
+  //
+  // Kept safely under 65536: the wire window field is 16 bits and
+  // app_rx_len below is itself a uint16_t, so anything from here up to
+  // 65535 is representable, but a buffer size that's an exact multiple
+  // of 65536 truncates the *advertised window* to zero, not merely a
+  // small one — caught live going straight from 16640 to 131072.
+#define TCP_APP_RX_MAX 49152
   volatile uint16_t app_rx_len;
   uint8_t app_rx_buf[TCP_APP_RX_MAX];
 };

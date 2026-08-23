@@ -616,27 +616,6 @@ static void html_to_lines(void) {
     push_line(line, llen);
 }
 
-/* Highlight the row the currently-selected link is on (white background,
- * black text — a brighter bar than editor.c's light-grey status bar, so
- * it reads as a selection rather than a status line) by poking the VGA
- * text buffer's attribute bytes directly — log_writestring() has no
- * notion of color, so this runs as a second pass over whatever
- * browser_render() already drew. Assumes the standard 80x25 text mode the
- * rest of the console (and editor.c) assumes. */
-#define VGA_TEXT_WIDTH 80
-#define VGA_ATTR_SELECTED 0xF0 /* bg=white(15), fg=black(0) */
-static void highlight_selected_link(int scroll, int selected_link) {
-  if (selected_link < 0 || selected_link >= n_links)
-    return;
-  int line_idx = link_line[selected_link];
-  if (line_idx < scroll || line_idx >= scroll + VIEW_ROWS)
-    return; /* selection scrolled off-screen */
-  int row = 1 + (line_idx - scroll); /* row 0 is the header line */
-  uint8_t *vid = (uint8_t *)0xB8000;
-  for (int col = 0; col < VGA_TEXT_WIDTH; col++)
-    vid[(row * VGA_TEXT_WIDTH + col) * 2 + 1] = VGA_ATTR_SELECTED;
-}
-
 static void browser_render(int scroll, const char *linknum_buf,
                            int selected_link) {
   terminal_clear();
@@ -646,11 +625,22 @@ static void browser_render(int scroll, const char *linknum_buf,
   else
     log_writestring(" AJOS browser - q: quit, up/down: scroll\n");
   for (int r = 0; r < VIEW_ROWS && scroll + r < n_lines; r++) {
+    /* Highlight the selected link's line with ANSI SGR codes (white
+     * background, black text), not a VGA-memory poke: this build runs
+     * with AJOS_SERIAL_ONLY, where log_putchar() skips the VGA text
+     * buffer entirely and only ever writes to serial — a real terminal
+     * on the other end, which *does* understand ANSI escapes, unlike a
+     * raw VGA console. */
+    int selected_row = selected_link >= 0 && selected_link < n_links &&
+                       link_line[selected_link] == scroll + r;
+    if (selected_row)
+      log_writestring("\x1b[47m\x1b[30m");
     log_writestring(" ");
     log_writestring(lines[scroll + r]);
+    if (selected_row)
+      log_writestring("\x1b[0m");
     log_writestring("\n");
   }
-  highlight_selected_link(scroll, selected_link);
   log_writestring(" [");
   log_write_u32((uint32_t)(scroll + 1));
   log_writestring("-");

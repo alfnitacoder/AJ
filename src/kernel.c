@@ -2036,6 +2036,25 @@ static void terminal_scroll(void)
 
 void terminal_clear(void)
 {
+  /* This only ever clears VGA memory below, which a real terminal on the
+   * other end of the serial line never sees (AJOS_SERIAL_ONLY builds
+   * skip VGA writes in log_putchar() entirely, and even non-serial-only
+   * builds mirror everything to serial too). Without this, every caller
+   * that "clears the screen" — the shell's `clear`, the editor, the
+   * browser's page redraws — just prints fresh content that scrolls
+   * below whatever was there before on a real terminal, stacking
+   * repeated renders instead of replacing them. ANSI clear-screen +
+   * cursor-home fixes that for anyone actually watching over serial,
+   * and is a no-op (unrecognized escape bytes, ignored) for anything
+   * that isn't an ANSI-aware terminal on the other end. */
+  serial_putchar('\x1b');
+  serial_putchar('[');
+  serial_putchar('2');
+  serial_putchar('J');
+  serial_putchar('\x1b');
+  serial_putchar('[');
+  serial_putchar('H');
+
   terminal_row = 0;
   terminal_column = 0;
   terminal_color = VGA_GREEN | (VGA_BLACK << 4);
