@@ -5,3 +5,6 @@ build/
 *.backup
 openssh-portable/
 reference/
+# Optional LLM weights (download via Makefile; too large for GitHub)
+data/STORIES*.BIN
+data/TOK*.BIN
