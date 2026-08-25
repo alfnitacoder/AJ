@@ -2570,9 +2570,9 @@ static void ssh_handle_channel_request(struct ssh_connection *conn,
     ssh_write_u32(response, conn->client_channel);
     if (is_sftp && sftp_session_init(conn))
     {
+      ssh_console_writestring("[SSH] SFTP subsystem started\n");
       if (want_reply)
         ssh_send_packet(conn, SSH_MSG_CHANNEL_SUCCESS, response, 4);
-      ssh_console_writestring("[SSH] SFTP subsystem started\n");
     }
     else if (want_reply)
       ssh_send_packet(conn, SSH_MSG_CHANNEL_FAILURE, response, 4);

@@ -112,6 +112,9 @@ struct sftp_sess
   uint32_t rx_cap;
   uint32_t next_id;
   struct sftp_handle handles[SFTP_MAX_HANDLES];
+  /* Static RX: kmalloc(32KB) via PMM during CHANNEL_REQUEST wedged the
+   * guest (IRQs/tcp_input). BSS is NOLOAD so this does not grow kernel.bin. */
+  uint8_t rx_store[SFTP_RX_MAX];
 };
 
 static struct sftp_sess sftp_sessions[SFTP_MAX_SESSIONS];
@@ -437,14 +440,13 @@ static void sftp_sess_reset(struct sftp_sess *s)
 {
   if (!s)
     return;
-  if (s->rx)
-  {
-    kfree(s->rx);
-    s->rx = 0;
-  }
   for (int i = 0; i < SFTP_MAX_HANDLES; i++)
     sftp_handle_free(&s->handles[i]);
-  mem_set((uint8_t *)s, 0, sizeof(*s));
+  s->conn = 0;
+  s->rx = 0;
+  s->rx_len = 0;
+  s->rx_cap = 0;
+  s->next_id = 0;
 }
 
 static struct sftp_handle *sftp_handle_by_id(struct sftp_sess *s, uint32_t id)
@@ -1441,25 +1443,27 @@ int sftp_session_init(struct ssh_connection *conn)
     return 0;
   sftp_session_close(conn);
   struct sftp_sess *s = 0;
+  int slot = -1;
   for (int i = 0; i < SFTP_MAX_SESSIONS; i++)
   {
     if (!sftp_sessions[i].conn)
     {
       s = &sftp_sessions[i];
+      slot = i;
       break;
     }
   }
   if (!s)
     return 0;
-  mem_set((uint8_t *)s, 0, sizeof(*s));
-  s->rx = (uint8_t *)kmalloc(SFTP_RX_MAX);
-  if (!s->rx)
-    return 0;
-  s->conn = conn;
+  for (int i = 0; i < SFTP_MAX_HANDLES; i++)
+    sftp_handle_free(&s->handles[i]);
+  s->rx = s->rx_store;
   s->rx_cap = SFTP_RX_MAX;
   s->rx_len = 0;
   s->next_id = 1;
+  s->conn = conn;
   conn->sftp_active = 1;
+  (void)slot;
   log_writestring("[SFTP] session started\n");
   return 1;
 }
