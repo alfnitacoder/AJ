@@ -1,4 +1,5 @@
 #include "sftp.h"
+#include "disk.h"
 #include "fat.h"
 #include "kernel.h"
 #include "ramfs.h"
@@ -498,67 +499,93 @@ static fat12_ctx *sftp_boot_fat(struct vfs_mount *m)
   return m ? (fat12_ctx *)m->fs_ctx : 0;
 }
 
+/* 1 = filled *out, 0 = skip, -1 = end of directory. Uses 8.3 names so we
+ * can parse one 512-byte sector without a PMM-sized root-dir allocation. */
+static int sftp_dirent_from_raw(const struct fat12_dirent *e,
+                                struct sftp_dirent *out)
+{
+  char formatted[13];
+  uint32_t k;
+  if (e->name[0] == 0x00)
+    return -1;
+  if (e->name[0] == 0xE5 || (e->attr & 0x08) || e->attr == FAT_ATTR_LFN)
+    return 0;
+  fat12_format_name(e->name, formatted);
+  if (formatted[0] == '\0' || sftp_is_dot_name(formatted))
+    return 0;
+  k = 0;
+  while (formatted[k] && k + 1 < SFTP_NAME_MAX)
+  {
+    out->name[k] = formatted[k];
+    k++;
+  }
+  out->name[k] = '\0';
+  out->is_dir = (e->attr & 0x10) ? 1 : 0;
+  out->size = e->size;
+  return 1;
+}
+
+static int sftp_fat_list_sectors(uint8_t drive, uint32_t lba, uint16_t nsec,
+                                 struct sftp_dirent *ents, uint32_t max,
+                                 uint32_t *out_n)
+{
+  static uint8_t sec[512];
+  uint32_t n = 0;
+  uint16_t s;
+  if (!ents || !out_n || max == 0 || nsec == 0)
+    return 0;
+  for (s = 0; s < nsec && n < max; s++)
+  {
+    int i;
+    if (!disk_read_sector(drive, lba + s, sec))
+      return 0;
+    for (i = 0; i < 16 && n < max; i++)
+    {
+      int r = sftp_dirent_from_raw(
+          (const struct fat12_dirent *)(sec + (uint32_t)i * 32u), &ents[n]);
+      if (r < 0)
+      {
+        *out_n = n;
+        return 1;
+      }
+      if (r > 0)
+        n++;
+    }
+  }
+  *out_n = n;
+  return 1;
+}
+
 static int sftp_fat_list(fat12_ctx *ctx, const char *fs_path,
                          struct sftp_dirent *ents, uint32_t max,
                          uint32_t *out_n)
 {
-  extern fat12_ctx fat_global_ctx;
-  /* Live boot ctx already tracks writes; reload re-reads the whole FAT. */
-  if (ctx != &fat_global_ctx)
-    fat12_reload(ctx);
-  uint8_t *dir_buf = 0;
-  uint32_t dir_bytes = 0;
-  int ok = 0;
   const char *p = fs_path ? fs_path : "/";
+  uint8_t spc;
+  if (!ctx || !ents || !out_n)
+    return 0;
   if (p[0] == '\0' || (p[0] == '/' && p[1] == '\0'))
-    ok = fat12_read_root_dir(ctx, &dir_buf, &dir_bytes);
-  else
+    return sftp_fat_list_sectors(ctx->drive, ctx->root_lba, ctx->root_sectors,
+                                 ents, max, out_n);
   {
     int dok = 0;
     const char *rp = p;
+    uint16_t cluster;
     if (*rp == '/')
       rp++;
-    uint16_t cluster = fat12_resolve_dir(ctx, 0, rp, &dok);
-    if (dok)
-      ok = (cluster == 0) ? fat12_read_root_dir(ctx, &dir_buf, &dir_bytes)
-                          : fat12_read_dir_cluster(ctx, cluster, &dir_buf,
-                                                   &dir_bytes);
+    cluster = fat12_resolve_dir(ctx, 0, rp, &dok);
+    if (!dok)
+      return 0;
+    if (cluster == 0)
+      return sftp_fat_list_sectors(ctx->drive, ctx->root_lba, ctx->root_sectors,
+                                   ents, max, out_n);
+    /* First cluster only — enough for FAT12 floppy dirs; no kmalloc. */
+    spc = ctx->bpb.sectors_per_cluster;
+    if (spc == 0)
+      spc = 1;
+    return sftp_fat_list_sectors(ctx->drive, fat12_cluster_lba(ctx, cluster),
+                                 spc, ents, max, out_n);
   }
-  if (!ok || !dir_buf)
-  {
-    if (dir_buf)
-      kfree(dir_buf);
-    return 0;
-  }
-  uint32_t n = 0;
-  uint32_t entries = dir_bytes / 32u;
-  for (uint32_t i = 0; i < entries && n < max; i++)
-  {
-    struct fat12_dirent *e = (struct fat12_dirent *)(dir_buf + i * 32u);
-    if (e->name[0] == 0x00)
-      break;
-    if (e->name[0] == 0xE5 || (e->attr & 0x08))
-      continue;
-    if (e->attr == FAT_ATTR_LFN)
-      continue;
-    char formatted[256];
-    fat12_display_name(dir_buf, i * 32u, formatted, sizeof(formatted));
-    if (formatted[0] == '\0' || sftp_is_dot_name(formatted))
-      continue;
-    uint32_t k = 0;
-    while (formatted[k] && k + 1 < SFTP_NAME_MAX)
-    {
-      ents[n].name[k] = formatted[k];
-      k++;
-    }
-    ents[n].name[k] = '\0';
-    ents[n].is_dir = (e->attr & 0x10) ? 1 : 0;
-    ents[n].size = e->size;
-    n++;
-  }
-  kfree(dir_buf);
-  *out_n = n;
-  return 1;
 }
 
 static int sftp_fat_stat(fat12_ctx *ctx, const char *fs_path, int *is_dir,
@@ -574,18 +601,11 @@ static int sftp_fat_stat(fat12_ctx *ctx, const char *fs_path, int *is_dir,
     *size = 0;
     return 1;
   }
-  int dok = 0;
+  /* Do not fat12_resolve_dir here: it kmallocs the whole root via
+   * fat12_find_in_dir. List the parent sector-by-sector instead. */
   const char *rp = p;
   if (*rp == '/')
     rp++;
-  fat12_resolve_dir(ctx, 0, rp, &dok);
-  if (dok)
-  {
-    *is_dir = 1;
-    *size = 0;
-    return 1;
-  }
-  /* Look up in parent directory. */
   char parent[SFTP_MAX_PATH];
   char name[SFTP_NAME_MAX];
   const char *last = rp;
@@ -1018,6 +1038,7 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
     uint8_t buf[5];
     buf[0] = SSH_FXP_VERSION;
     sftp_wr_u32(buf + 1, SFTP_VERSION);
+    log_writestring("[SFTP] INIT -> VERSION\n");
     sftp_reply(conn, buf, 5);
     return;
   }
@@ -1106,6 +1127,11 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
         sftp_status(conn, id, SSH_FX_FAILURE, "list failed");
         return;
       }
+      log_writestring("[SFTP] OPENDIR ");
+      log_writestring(canon);
+      log_writestring(" n=");
+      log_write_u32(h->dir_count);
+      log_putchar('\n');
       sftp_send_handle(conn, id, h->id);
       return;
     }

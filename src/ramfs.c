@@ -91,7 +91,10 @@ int ramfs_create_file(struct ramfs_ctx *ctx, const char *name,
   file->name[name_len] = '\0';
 
   // Allocate data buffer
-  uint32_t capacity = size > RAMFS_INITIAL_SIZE ? size : RAMFS_INITIAL_SIZE;
+  /* Exact size (min 64) so a small SFTP put does not kmalloc 4KB via PMM. */
+  uint32_t capacity = size;
+  if (capacity < 64)
+    capacity = 64;
   file->data = (uint8_t *)kmalloc(capacity);
   if (!file->data)
     return 0;
