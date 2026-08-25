@@ -8772,6 +8772,11 @@ void kernel_main()
   user_init();
   log_writestring("[INIT] user_init done\n");
 
+  {
+    extern void sftp_cache_boot_root(void);
+    sftp_cache_boot_root();
+  }
+
   log_writestring("Configuring network...\n");
   network_auto_setup();
   outb(0x3F8, (uint8_t)'N'); /* Network setup done */

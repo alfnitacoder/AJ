@@ -352,6 +352,29 @@ static uint8_t sftp_pkt_scratch[16384];
 /* Incoming SFTP payload copy so dispatch can consume RX before I/O/TX. */
 static uint8_t sftp_pkt_in[SFTP_RX_MAX];
 static uint8_t sftp_dispatching;
+/* Live floppy root sits past the 632-sector boot cache; BIOS reads from the
+ * SSH path return empty or hang. Snapshot at disk_init uses the wrong LBA.
+ * Cache the real root once at boot (same read user_init already does). */
+static uint8_t sftp_boot_root[16384];
+static uint32_t sftp_boot_root_len;
+static uint8_t sftp_boot_root_ready;
+
+void sftp_cache_boot_root(void)
+{
+  extern fat12_ctx fat_global_ctx;
+  uint8_t *buf = 0;
+  uint32_t bytes = 0;
+  if (sftp_boot_root_ready)
+    return;
+  if (!fat12_read_root_dir(&fat_global_ctx, &buf, &bytes) || !buf)
+    return;
+  if (bytes > sizeof(sftp_boot_root))
+    bytes = sizeof(sftp_boot_root);
+  mem_copy(sftp_boot_root, buf, bytes);
+  sftp_boot_root_len = bytes;
+  sftp_boot_root_ready = 1;
+  kfree(buf);
+}
 
 static void sftp_reply(struct ssh_connection *conn, const uint8_t *payload,
                        uint32_t plen)
@@ -539,25 +562,22 @@ static int sftp_fat_list_buf(const uint8_t *dir_buf, uint32_t dir_bytes,
   {
     const struct fat12_dirent *e =
         (const struct fat12_dirent *)(dir_buf + i * 32u);
-    char formatted[256];
-    uint32_t k;
-    if (e->name[0] == 0x00)
+    int r = sftp_dirent_from_raw(e, &ents[n]);
+    if (r < 0)
       break;
-    if (e->name[0] == 0xE5 || (e->attr & 0x08) || e->attr == FAT_ATTR_LFN)
-      continue;
-    fat12_display_name(dir_buf, i * 32u, formatted, sizeof(formatted));
-    if (formatted[0] == '\0' || sftp_is_dot_name(formatted))
-      continue;
-    k = 0;
-    while (formatted[k] && k + 1 < SFTP_NAME_MAX)
+    if (r > 0)
     {
-      ents[n].name[k] = formatted[k];
-      k++;
+      uint32_t k;
+      int ok_name = 1;
+      for (k = 0; ents[n].name[k]; k++)
+      {
+        char c = ents[n].name[k];
+        if (c < 32 || c > 126)
+          ok_name = 0;
+      }
+      if (ok_name)
+        n++;
     }
-    ents[n].name[k] = '\0';
-    ents[n].is_dir = (e->attr & 0x10) ? 1 : 0;
-    ents[n].size = e->size;
-    n++;
   }
   *out_n = n;
   return 1;
@@ -604,13 +624,9 @@ static int sftp_fat_list(fat12_ctx *ctx, const char *fs_path,
     return 0;
   if (p[0] == '\0' || (p[0] == '/' && p[1] == '\0'))
   {
-    uint32_t slba = 0, sbytes = 0;
-    const uint8_t *sbuf = 0;
-    /* Boot snapshot is the real floppy root (cache LBA ~533). fat_global_ctx
-     * root_lba can sit past the floppy cache; BIOS reads from SSH hang or
-     * return empty, so ls/STAT of /README.TXT fail. */
-    if (disk_get_floppy_root_snapshot(&slba, &sbuf, &sbytes) && sbuf && sbytes)
-      return sftp_fat_list_buf(sbuf, sbytes, ents, max, out_n);
+    if (sftp_boot_root_ready && sftp_boot_root_len)
+      return sftp_fat_list_buf(sftp_boot_root, sftp_boot_root_len, ents, max,
+                               out_n);
     return sftp_fat_list_sectors(ctx->drive, ctx->root_lba, ctx->root_sectors,
                                  ents, max, out_n);
   }
@@ -1088,7 +1104,6 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
     uint8_t buf[5];
     buf[0] = SSH_FXP_VERSION;
     sftp_wr_u32(buf + 1, SFTP_VERSION);
-    log_writestring("[SFTP] INIT -> VERSION\n");
     sftp_reply(conn, buf, 5);
     return;
   }
@@ -1177,11 +1192,6 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
         sftp_status(conn, id, SSH_FX_FAILURE, "list failed");
         return;
       }
-      log_writestring("[SFTP] OPENDIR ");
-      log_writestring(canon);
-      log_writestring(" n=");
-      log_write_u32(h->dir_count);
-      log_putchar('\n');
       sftp_send_handle(conn, id, h->id);
       return;
     }

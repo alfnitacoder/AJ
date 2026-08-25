@@ -6,6 +6,8 @@
 struct ssh_connection;
 
 /* RFC 4254 "subsystem" name "sftp" — draft-ietf-secsh-filexfer-02 (v3). */
+/* Copy the boot FAT root while BIOS disk is safe (before SSH RX). */
+void sftp_cache_boot_root(void);
 int sftp_session_init(struct ssh_connection *conn);
 void sftp_session_close(struct ssh_connection *conn);
 /* Append channel bytes only. Do not parse or reply here — that runs from
