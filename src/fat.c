@@ -1688,9 +1688,14 @@ int fat12_read_file_to_ram_ex_max(fat12_ctx *ctx, const char *path,
   if (spc == 0)
     spc = 1;
   uint32_t hops = 0;
+  uint32_t hop_max = (max_size / 256u) + 32u;
+  if (hop_max < 32u)
+    hop_max = 32u;
+  if (hop_max > 1048576u)
+    hop_max = 1048576u;
   while (cluster >= 2 && !fat_is_eoc(ctx, cluster) && written < read_size) {
     /* Cyclic or corrupt FAT must not wedge SSH/SFTP inside CHANNEL_DATA. */
-    if (++hops > 1048576u)
+    if (++hops > hop_max)
       break;
     uint32_t lba = fat12_cluster_lba(ctx, cluster);
     for (uint8_t s = 0; s < spc && written < read_size; s++) {

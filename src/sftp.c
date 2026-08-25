@@ -347,25 +347,20 @@ static uint32_t sftp_put_attrs(uint8_t *d, int is_dir, uint32_t size)
   return 16;
 }
 
+static uint8_t sftp_pkt_scratch[16384];
+
 static void sftp_reply(struct ssh_connection *conn, const uint8_t *payload,
                        uint32_t plen)
 {
-  uint8_t small[512];
   uint8_t *pkt;
-  if (4u + plen <= sizeof(small))
-    pkt = small;
+  if (4u + plen <= sizeof(sftp_pkt_scratch))
+    pkt = sftp_pkt_scratch;
   else
-  {
-    pkt = (uint8_t *)kmalloc(4u + plen);
-    if (!pkt)
-      return;
-  }
+    return;
   sftp_wr_u32(pkt, plen);
   if (plen)
     mem_copy(pkt + 4, payload, plen);
   ssh_channel_write(conn, pkt, 4u + plen);
-  if (pkt != small)
-    kfree(pkt);
 }
 
 static void sftp_status(struct ssh_connection *conn, uint32_t id, uint32_t code,
@@ -744,15 +739,12 @@ static int sftp_load_file(const char *canon, uint8_t **data, uint32_t *size)
   struct vfs_mount *m = &vfs->mounts[mount_id];
   if (m->fstype == VFS_FSTYPE_FAT)
   {
-    /* Do not fat12_init() a ~17KB ctx on the SSH stack, and do not fat12_reload()
-     * here: both have wedged OpenSSH `get` while CHANNEL_DATA was still being
-     * handled. Use the long-lived mount ctx with a hop-capped read. */
-    fat12_ctx *ctx = (fat12_ctx *)m->fs_ctx;
+    /* Long-lived boot FAT ctx. Do not fat12_init()/PMM-alloc from CHANNEL_DATA. */
+    extern fat12_ctx fat_global_ctx;
     if (kstreq(m->mount_point, "/"))
-    {
-      extern fat12_ctx fat_global_ctx;
-      ctx = &fat_global_ctx;
-    }
+      return fat12_read_file_to_ram_ex_max(&fat_global_ctx, fs_path, data, size,
+                                           SFTP_MAX_FILE);
+    fat12_ctx *ctx = (fat12_ctx *)m->fs_ctx;
     return fat12_read_file_to_ram_ex_max(ctx, fs_path, data, size, SFTP_MAX_FILE);
   }
   if (m->fstype == VFS_FSTYPE_RAMFS)
@@ -777,20 +769,10 @@ static int sftp_ensure_loaded(struct sftp_handle *h)
   uint8_t *data = 0;
   uint32_t size = 0;
   if (!sftp_load_file(h->path, &data, &size))
-  {
-    log_writestring("[SFTP] load failed ");
-    log_writestring(h->path);
-    log_putchar('\n');
     return 0;
-  }
   h->data = data;
   h->size = size;
   h->cap = size;
-  log_writestring("[SFTP] loaded ");
-  log_writestring(h->path);
-  log_writestring(" bytes=");
-  log_write_u32(size);
-  log_putchar('\n');
   return 1;
 }
 
@@ -1029,17 +1011,6 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
   if (len < 1)
     return;
   uint8_t type = p[0];
-  if (type != SSH_FXP_INIT)
-  {
-    log_writestring("[SFTP] rx type=");
-    log_write_u32(type);
-    if (len >= 5)
-    {
-      log_writestring(" id=");
-      log_write_u32(sftp_rd_u32(p + 1));
-    }
-    log_putchar('\n');
-  }
   if (type == SSH_FXP_INIT)
   {
     uint8_t buf[5];
@@ -1301,8 +1272,6 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
       sftp_status(conn, id, SSH_FX_FAILURE, "bad handle");
       return;
     }
-    if (!h->is_dir && !h->data && !(h->flags & SSH_FXF_TRUNC))
-      (void)sftp_ensure_loaded(h);
     sftp_send_attrs(conn, id, h->is_dir, h->size);
     return;
   }
@@ -1351,19 +1320,18 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
     if (want > SFTP_DATA_MAX)
       want = SFTP_DATA_MAX;
     uint32_t plen = 1 + 4 + 4 + want;
-    uint8_t *buf = (uint8_t *)kmalloc(plen);
-    if (!buf)
+    static uint8_t sftp_read_payload[SFTP_DATA_MAX + 16];
+    if (plen > sizeof(sftp_read_payload))
     {
       sftp_status(conn, id, SSH_FX_FAILURE, "nomem");
       return;
     }
-    buf[0] = SSH_FXP_DATA;
-    sftp_wr_u32(buf + 1, id);
-    sftp_wr_u32(buf + 5, want);
+    sftp_read_payload[0] = SSH_FXP_DATA;
+    sftp_wr_u32(sftp_read_payload + 1, id);
+    sftp_wr_u32(sftp_read_payload + 5, want);
     if (want && h->data)
-      mem_copy(buf + 9, h->data + off_lo, want);
-    sftp_reply(conn, buf, plen);
-    kfree(buf);
+      mem_copy(sftp_read_payload + 9, h->data + off_lo, want);
+    sftp_reply(conn, sftp_read_payload, plen);
     return;
   }
 
