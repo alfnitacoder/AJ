@@ -3193,6 +3193,8 @@ void ssh_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len)
         sshbuf_consume(conn->rx_buf, full_len + mac_len);
         conn->crypto.recv_seq++;
         ssh_flush_pending_shell_commands(conn);
+        if (conn->sftp_active)
+          sftp_process_pending(conn);
         continue;
       }
       uint8_t msg_type = sshd_rx_buffer[5];
@@ -3245,6 +3247,8 @@ void ssh_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len)
       sshbuf_consume(conn->rx_buf, full_len + mac_len);
       conn->crypto.recv_seq++;
       ssh_flush_pending_shell_commands(conn);
+      if (conn->sftp_active)
+        sftp_process_pending(conn);
       if (ssh_drop_tcp_after_packet && conn->pcb)
         tcp_close(conn->pcb);
       continue;
@@ -3467,6 +3471,8 @@ void ssh_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len)
     sshbuf_consume(conn->rx_buf, full_len);
     conn->recv_packet_count++;
     ssh_flush_pending_shell_commands(conn);
+    if (conn->sftp_active)
+      sftp_process_pending(conn);
   }
 
   if (ssh_tx_mirror_guard_depth != 0u)
@@ -3480,6 +3486,8 @@ void ssh_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len)
       ssh_suppress_log_mirror_to_session = 0u;
   }
   conn->processing = 0;
+  if (conn->sftp_active)
+    sftp_process_pending(conn);
 }
 
 // Update SSH listener IP (called when IP changes)

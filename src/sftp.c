@@ -101,7 +101,7 @@ struct sftp_handle
   uint32_t cap;
   uint32_t dir_count;
   uint32_t dir_index;
-  struct sftp_dirent *dirents;
+  struct sftp_dirent dirents[SFTP_DIR_MAX];
 };
 
 struct sftp_sess
@@ -348,12 +348,22 @@ static uint32_t sftp_put_attrs(uint8_t *d, int is_dir, uint32_t size)
 }
 
 static uint8_t sftp_pkt_scratch[16384];
+/* Incoming SFTP payload copy so dispatch can consume RX before I/O/TX. */
+static uint8_t sftp_pkt_in[SFTP_RX_MAX];
+static uint8_t sftp_dispatching;
 
 static void sftp_reply(struct ssh_connection *conn, const uint8_t *payload,
                        uint32_t plen)
 {
   uint8_t small[512];
   uint8_t *pkt;
+  /* Build-in-place: NAME/DATA already live at sftp_pkt_scratch+4. */
+  if (payload == sftp_pkt_scratch + 4 && 4u + plen <= sizeof(sftp_pkt_scratch))
+  {
+    sftp_wr_u32(sftp_pkt_scratch, plen);
+    ssh_channel_write(conn, sftp_pkt_scratch, 4u + plen);
+    return;
+  }
   if (4u + plen <= sizeof(small))
     pkt = small;
   else if (4u + plen <= sizeof(sftp_pkt_scratch))
@@ -426,11 +436,6 @@ static void sftp_handle_free(struct sftp_handle *h)
     kfree(h->data);
     h->data = 0;
   }
-  if (h->dirents)
-  {
-    kfree(h->dirents);
-    h->dirents = 0;
-  }
   mem_set((uint8_t *)h, 0, sizeof(*h));
 }
 
@@ -485,11 +490,22 @@ static int sftp_path_copy(char *dst, const char *src)
   return src[i] == '\0';
 }
 
+static fat12_ctx *sftp_boot_fat(struct vfs_mount *m)
+{
+  extern fat12_ctx fat_global_ctx;
+  if (m && kstreq(m->mount_point, "/"))
+    return &fat_global_ctx;
+  return m ? (fat12_ctx *)m->fs_ctx : 0;
+}
+
 static int sftp_fat_list(fat12_ctx *ctx, const char *fs_path,
                          struct sftp_dirent *ents, uint32_t max,
                          uint32_t *out_n)
 {
-  fat12_reload(ctx);
+  extern fat12_ctx fat_global_ctx;
+  /* Live boot ctx already tracks writes; reload re-reads the whole FAT. */
+  if (ctx != &fat_global_ctx)
+    fat12_reload(ctx);
   uint8_t *dir_buf = 0;
   uint32_t dir_bytes = 0;
   int ok = 0;
@@ -548,7 +564,9 @@ static int sftp_fat_list(fat12_ctx *ctx, const char *fs_path,
 static int sftp_fat_stat(fat12_ctx *ctx, const char *fs_path, int *is_dir,
                          uint32_t *size)
 {
-  fat12_reload(ctx);
+  extern fat12_ctx fat_global_ctx;
+  if (ctx != &fat_global_ctx)
+    fat12_reload(ctx);
   const char *p = fs_path ? fs_path : "/";
   if (p[0] == '\0' || (p[0] == '/' && p[1] == '\0'))
   {
@@ -601,16 +619,16 @@ static int sftp_fat_stat(fat12_ctx *ctx, const char *fs_path, int *is_dir,
       /* already "/" */
     }
   }
-  struct sftp_dirent ents[SFTP_DIR_MAX];
+  static struct sftp_dirent sftp_stat_ents[SFTP_DIR_MAX];
   uint32_t n = 0;
-  if (!sftp_fat_list(ctx, parent, ents, SFTP_DIR_MAX, &n))
+  if (!sftp_fat_list(ctx, parent, sftp_stat_ents, SFTP_DIR_MAX, &n))
     return 0;
   for (uint32_t i = 0; i < n; i++)
   {
-    if (sftp_name_eq_ci(ents[i].name, name))
+    if (sftp_name_eq_ci(sftp_stat_ents[i].name, name))
     {
-      *is_dir = ents[i].is_dir;
-      *size = ents[i].size;
+      *is_dir = sftp_stat_ents[i].is_dir;
+      *size = sftp_stat_ents[i].size;
       return 1;
     }
   }
@@ -649,7 +667,10 @@ static int sftp_path_info(const char *canon, int *is_dir, uint32_t *size)
   }
   if (m->fstype == VFS_FSTYPE_FAT)
   {
-    return sftp_fat_stat((fat12_ctx *)m->fs_ctx, fs_path, is_dir, size);
+    fat12_ctx *fctx = sftp_boot_fat(m);
+    if (!fctx)
+      return 0;
+    return sftp_fat_stat(fctx, fs_path, is_dir, size);
   }
   if (m->fstype == VFS_FSTYPE_RAMFS)
   {
@@ -665,67 +686,53 @@ static int sftp_path_info(const char *canon, int *is_dir, uint32_t *size)
   return 0;
 }
 
-static int sftp_list_path(const char *canon, struct sftp_dirent **out_ents,
-                          uint32_t *out_n)
+static int sftp_list_path(const char *canon, struct sftp_dirent *ents,
+                          uint32_t max, uint32_t *out_n)
 {
   struct vfs_ctx *vfs = vfs_get_global();
-  if (!vfs)
+  if (!vfs || !ents || !out_n || max == 0)
     return 0;
   int mount_id = -1;
   char fs_path[VFS_MAX_PATH_LEN];
   if (!vfs_resolve_path(vfs, canon, &mount_id, fs_path))
     return 0;
   struct vfs_mount *m = &vfs->mounts[mount_id];
-  struct sftp_dirent *ents =
-      (struct sftp_dirent *)kmalloc(sizeof(struct sftp_dirent) * SFTP_DIR_MAX);
-  if (!ents)
-    return 0;
-  mem_set((uint8_t *)ents, 0, sizeof(struct sftp_dirent) * SFTP_DIR_MAX);
+  mem_set((uint8_t *)ents, 0, sizeof(struct sftp_dirent) * max);
   uint32_t n = 0;
   int ok = 0;
   if (m->fstype == VFS_FSTYPE_FAT)
   {
-    ok = sftp_fat_list((fat12_ctx *)m->fs_ctx, fs_path, ents, SFTP_DIR_MAX, &n);
+    fat12_ctx *fctx = sftp_boot_fat(m);
+    if (!fctx)
+      return 0;
+    ok = sftp_fat_list(fctx, fs_path, ents, max, &n);
   }
   else if (m->fstype == VFS_FSTYPE_RAMFS)
   {
+    /* Walk the ramfs table directly — ramfs_list_files kmallocs. */
     struct ramfs_ctx *rc = (struct ramfs_ctx *)m->fs_ctx;
-    char **names = 0;
-    uint32_t count = 0;
-    if (ramfs_list_files(rc, &names, &count))
+    ok = 1;
+    for (int i = 0; rc && i < RAMFS_MAX_FILES && n < max; i++)
     {
-      ok = 1;
-      for (uint32_t i = 0; i < count && n < SFTP_DIR_MAX; i++)
+      if (!rc->files[i].in_use)
+        continue;
+      const char *nm = rc->files[i].name;
+      while (*nm == '/')
+        nm++;
+      uint32_t k = 0;
+      while (nm[k] && k + 1 < SFTP_NAME_MAX)
       {
-        const char *nm = names[i];
-        while (*nm == '/')
-          nm++;
-        uint32_t k = 0;
-        while (nm[k] && k + 1 < SFTP_NAME_MAX)
-        {
-          ents[n].name[k] = nm[k];
-          k++;
-        }
-        ents[n].name[k] = '\0';
-        ents[n].is_dir = 0;
-        ramfs_get_file_size(rc, names[i], &ents[n].size);
-        if (!ents[n].size)
-          ramfs_get_file_size(rc, nm, &ents[n].size);
-        n++;
+        ents[n].name[k] = nm[k];
+        k++;
       }
-      if (count > 0 && names)
-      {
-        kfree(names[0]);
-        kfree(names);
-      }
+      ents[n].name[k] = '\0';
+      ents[n].is_dir = 0;
+      ents[n].size = rc->files[i].size;
+      n++;
     }
   }
   if (!ok)
-  {
-    kfree(ents);
     return 0;
-  }
-  *out_ents = ents;
   *out_n = n;
   return 1;
 }
@@ -743,11 +750,9 @@ static int sftp_load_file(const char *canon, uint8_t **data, uint32_t *size)
   if (m->fstype == VFS_FSTYPE_FAT)
   {
     /* Long-lived boot FAT ctx. Do not fat12_init()/PMM-alloc from CHANNEL_DATA. */
-    extern fat12_ctx fat_global_ctx;
-    if (kstreq(m->mount_point, "/"))
-      return fat12_read_file_to_ram_ex_max(&fat_global_ctx, fs_path, data, size,
-                                           SFTP_MAX_FILE);
-    fat12_ctx *ctx = (fat12_ctx *)m->fs_ctx;
+    fat12_ctx *ctx = sftp_boot_fat(m);
+    if (!ctx)
+      return 0;
     return fat12_read_file_to_ram_ex_max(ctx, fs_path, data, size, SFTP_MAX_FILE);
   }
   if (m->fstype == VFS_FSTYPE_RAMFS)
@@ -924,8 +929,8 @@ static void sftp_send_name_one(struct ssh_connection *conn, uint32_t id,
   while (longn[lnl])
     lnl++;
   uint32_t plen = 1 + 4 + 4 + 4 + fnl + 4 + lnl + 16;
-  uint8_t *buf = (uint8_t *)kmalloc(plen);
-  if (!buf)
+  uint8_t buf[512];
+  if (plen > sizeof(buf))
   {
     sftp_status(conn, id, SSH_FX_FAILURE, "nomem");
     return;
@@ -946,7 +951,6 @@ static void sftp_send_name_one(struct ssh_connection *conn, uint32_t id,
   o += lnl;
   o += sftp_put_attrs(buf + o, is_dir, size);
   sftp_reply(conn, buf, o);
-  kfree(buf);
 }
 
 static void sftp_send_readdir(struct ssh_connection *conn, uint32_t id,
@@ -958,18 +962,14 @@ static void sftp_send_readdir(struct ssh_connection *conn, uint32_t id,
     sftp_status(conn, id, SSH_FX_EOF, "end of dir");
     return;
   }
-  /* Send remaining entries in one NAME packet (capped). */
+  /* Send remaining entries in one NAME packet (capped). Built in
+   * sftp_pkt_scratch so we never kmalloc a PMM-sized NAME payload. */
   uint32_t remain = h->dir_count - h->dir_index;
   uint32_t batch = remain;
   if (batch > 16)
     batch = 16;
-  uint32_t cap = 1 + 4 + 4 + batch * (4 + SFTP_NAME_MAX + 4 + 160 + 16) + 32;
-  uint8_t *buf = (uint8_t *)kmalloc(cap);
-  if (!buf)
-  {
-    sftp_status(conn, id, SSH_FX_FAILURE, "nomem");
-    return;
-  }
+  uint32_t cap = sizeof(sftp_pkt_scratch) - 4u;
+  uint8_t *buf = sftp_pkt_scratch + 4;
   uint32_t o = 0;
   buf[o++] = SSH_FXP_NAME;
   sftp_wr_u32(buf + o, id);
@@ -1005,7 +1005,6 @@ static void sftp_send_readdir(struct ssh_connection *conn, uint32_t id,
   sftp_wr_u32(buf + count_off, sent);
   h->dir_index += sent;
   sftp_reply(conn, buf, o);
-  kfree(buf);
 }
 
 static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
@@ -1101,7 +1100,7 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
       }
       sftp_path_copy(h->path, canon);
       h->is_dir = 1;
-      if (!sftp_list_path(canon, &h->dirents, &h->dir_count))
+      if (!sftp_list_path(canon, h->dirents, SFTP_DIR_MAX, &h->dir_count))
       {
         sftp_handle_free(h);
         sftp_status(conn, id, SSH_FX_FAILURE, "list failed");
@@ -1461,25 +1460,54 @@ void sftp_feed(struct ssh_connection *conn, const uint8_t *data, uint32_t len)
     mem_copy(s->rx + s->rx_len, data + pos, chunk);
     s->rx_len += chunk;
     pos += chunk;
-    while (s->rx_len >= 4)
-    {
-      uint32_t pktlen = sftp_rd_u32(s->rx);
-      if (pktlen < 1 || pktlen > s->rx_cap - 4)
-      {
-        log_writestring("[SFTP] bad packet length ");
-        log_write_u32(pktlen);
-        log_putchar('\n');
-        s->rx_len = 0;
-        return;
-      }
-      if (s->rx_len < 4 + pktlen)
-        break;
-      sftp_on_packet(s, s->rx + 4, (int)pktlen);
-      uint32_t used = 4 + pktlen;
-      uint32_t rest = s->rx_len - used;
-      if (rest)
-        mem_copy(s->rx, s->rx + used, rest);
-      s->rx_len = rest;
-    }
   }
+}
+
+void sftp_process_pending(struct ssh_connection *conn)
+{
+  struct sftp_sess *s;
+  if (!conn || !conn->sftp_active || sftp_dispatching)
+    return;
+  s = sftp_find(conn);
+  if (!s || !s->rx)
+    return;
+
+  /* Same pattern as ssh_flush_pending_shell_commands: drop processing so
+   * nested tcp_input can append CHANNEL_DATA / WINDOW_ADJUST while FAT I/O
+   * and CHANNEL_DATA TX run. */
+  uint8_t saved_processing = conn->processing;
+  sftp_dispatching = 1;
+  conn->processing = 0;
+
+  while (s->rx_len >= 4)
+  {
+    uint32_t pktlen = sftp_rd_u32(s->rx);
+    uint32_t used;
+    uint32_t rest;
+    if (pktlen < 1 || pktlen > s->rx_cap - 4)
+    {
+      log_writestring("[SFTP] bad packet length ");
+      log_write_u32(pktlen);
+      log_putchar('\n');
+      s->rx_len = 0;
+      break;
+    }
+    if (s->rx_len < 4 + pktlen)
+      break;
+    if (pktlen > sizeof(sftp_pkt_in))
+    {
+      s->rx_len = 0;
+      break;
+    }
+    mem_copy(sftp_pkt_in, s->rx + 4, pktlen);
+    used = 4 + pktlen;
+    rest = s->rx_len - used;
+    if (rest)
+      mem_copy(s->rx, s->rx + used, rest);
+    s->rx_len = rest;
+    sftp_on_packet(s, sftp_pkt_in, (int)pktlen);
+  }
+
+  conn->processing = saved_processing;
+  sftp_dispatching = 0;
 }
