@@ -6,6 +6,7 @@
 #include "net.h"
 #include "netdev.h"
 #include "pbuf.h"
+#include "sftp.h"
 #include "openssh/sshbuf.h"
 #include "openssh/ssherr.h"
 #include <stddef.h>
@@ -218,6 +219,8 @@ static void ssh_destroy_connection(struct ssh_connection *conn)
     ssh_mirror_len = 0;
   }
 
+  sftp_session_close(conn);
+
   // Clear connection state
   conn->pcb = NULL;
   conn->state = SSH_STATE_VERSION_EXCHANGE;
@@ -305,6 +308,7 @@ static struct ssh_connection *ssh_find_connection(struct tcp_pcb *pcb)
       conn->server_window = 65536;
       conn->deferred_window_adjust = 0;
       conn->shell_session_started = 0;
+      conn->sftp_active = 0;
       conn->ssh_welcome_sent = 0;
       conn->shell_ignore_next_lf = 0;
       conn->shell_line_len = 0;
@@ -2285,6 +2289,12 @@ static void ssh_send_channel_data_raw(struct ssh_connection *conn,
   ssh_flush_deferred_window_adjust(conn);
 }
 
+void ssh_channel_write(struct ssh_connection *conn, const uint8_t *data,
+                       uint32_t len)
+{
+  ssh_send_channel_data_raw(conn, data, len);
+}
+
 /* PTY / interactive SSH: LF alone advances a line without CR → "staircase" text.
  * Emit CRLF for each '\n' not already preceded by '\r'. */
 static void ssh_send_channel_cstr(struct ssh_connection *conn, const char *s)
@@ -2505,6 +2515,8 @@ static void ssh_handle_channel_request(struct ssh_connection *conn,
     log_writestring("shell\n");
   else if (typ_len == 4 && memcmp(typ, "exec", 4) == 0)
     log_writestring("exec\n");
+  else if (typ_len == 9 && memcmp(typ, "subsystem", 9) == 0)
+    log_writestring("subsystem\n");
   else if (typ_len == 3 && memcmp(typ, "env", 3) == 0)
     log_writestring("env\n");
   else
@@ -2544,11 +2556,44 @@ static void ssh_handle_channel_request(struct ssh_connection *conn,
     return;
   }
 
+  /* RFC 4254 subsystem: string name. OpenSSH sftp(1) requests "sftp". */
+  if (typ_len == 9 && memcmp(typ, "subsystem", 9) == 0)
+  {
+    if (off + 4 > len)
+      return;
+    uint32_t name_len = ssh_read_u32(p + off);
+    off += 4;
+    if (name_len > 256u || off + (int)name_len > len)
+      return;
+    int is_sftp = (name_len == 4 && memcmp(p + off, "sftp", 4) == 0);
+    uint8_t response[4];
+    ssh_write_u32(response, conn->client_channel);
+    if (is_sftp && sftp_session_init(conn))
+    {
+      if (want_reply)
+        ssh_send_packet(conn, SSH_MSG_CHANNEL_SUCCESS, response, 4);
+      ssh_console_writestring("[SSH] SFTP subsystem started\n");
+    }
+    else if (want_reply)
+      ssh_send_packet(conn, SSH_MSG_CHANNEL_FAILURE, response, 4);
+    return;
+  }
+
+  /* Known no-ops / interactive setup. Unknown types fail (do not claim
+   * success for an unimplemented subsystem-like request). */
+  int ok = 0;
+  if ((typ_len == 7 && memcmp(typ, "pty-req", 7) == 0) ||
+      (typ_len == 5 && memcmp(typ, "shell", 5) == 0) ||
+      (typ_len == 3 && memcmp(typ, "env", 3) == 0) ||
+      (typ_len == 13 && memcmp(typ, "window-change", 13) == 0))
+    ok = 1;
+
   if (want_reply)
   {
     uint8_t response[4];
     ssh_write_u32(response, conn->client_channel);
-    ssh_send_packet(conn, SSH_MSG_CHANNEL_SUCCESS, response, 4);
+    ssh_send_packet(conn, ok ? SSH_MSG_CHANNEL_SUCCESS : SSH_MSG_CHANNEL_FAILURE,
+                    response, 4);
   }
 
   if (typ_len == 5 && memcmp(typ, "shell", 5) == 0)
@@ -2592,6 +2637,7 @@ static void ssh_handle_channel_open(struct ssh_connection *conn,
       1000 + (conn->pcb->remote_ip & 0xFF); // Simple ID generation
   conn->client_window = initial_window;
   conn->shell_session_started = 0;
+  sftp_session_close(conn);
   conn->ssh_welcome_sent = 0;
   conn->shell_ignore_next_lf = 0;
   conn->shell_line_len = 0;
@@ -2711,6 +2757,12 @@ static void ssh_handle_channel_data(struct ssh_connection *conn,
 
   const uint8_t *p = data + 8;
   int n = (int)str_len;
+
+  if (conn->sftp_active)
+  {
+    sftp_feed(conn, p, (uint32_t)n);
+    goto channel_window_refill;
+  }
 
   /* Interactive line discipline after "shell" (PTY) is up. */
   if (conn->shell_session_started)

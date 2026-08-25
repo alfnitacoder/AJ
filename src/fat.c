@@ -1204,7 +1204,9 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
 
   uint8_t name83[11];
   fat12_to_83(filename, name83);
-  uint16_t target_dir = fat12_cwd_cluster;
+  /* Absolute paths (leading '/') are rooted at the volume root, not cwd.
+   * Without this, SFTP put of /FILE.TXT followed a serial-console `cd`. */
+  uint16_t target_dir = (*fn == '/') ? 0 : fat12_cwd_cluster;
   if (filename != fn && filename > fn + 1) {
     /* Path has directory - resolve it (e.g. "etc/PASSWD" -> write to etc) */
     const char *dir_start = (*fn == '/') ? fn + 1 : fn;
@@ -2138,7 +2140,7 @@ int fat12_delete_file(const char *path) {
       break;
     }
   }
-  uint16_t target_dir = fat12_cwd_cluster;
+  uint16_t target_dir = (*path == '/') ? 0 : fat12_cwd_cluster;
   if (filename != path && filename > path + 1) {
     const char *dir_start = (*path == '/') ? path + 1 : path;
     size_t dir_len = (size_t)((filename - 1) - dir_start);

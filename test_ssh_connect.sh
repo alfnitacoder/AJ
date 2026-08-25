@@ -1,6 +1,7 @@
 #!/bin/bash
 # Simple script to test SSH connection to AJOS
 # Make sure AJOS is running first with: make run-console
+# File transfer: ./test_sftp.sh  (same host/port/user/password)
 #
 # Transport encryption (AES-128-CTR) is implemented; the connection should
 # complete. The script still times out after 15s if something hangs.

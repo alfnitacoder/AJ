@@ -58,6 +58,7 @@
 #define SSH_CHANNEL_REQUEST_PTY "pty-req"
 #define SSH_CHANNEL_REQUEST_SHELL "shell"
 #define SSH_CHANNEL_REQUEST_EXEC "exec"
+#define SSH_CHANNEL_REQUEST_SUBSYSTEM "subsystem"
 
 /* Deferred shell lines: run after current SSH packet is consumed so
  * conn->processing can drop during shell_execute (nested tcp_input/SSH RX). */
@@ -108,6 +109,7 @@ struct ssh_connection
   /* WINDOW_ADJUST bytes deferred while nested inside CHANNEL_DATA TX. */
   uint32_t deferred_window_adjust;
   uint8_t shell_session_started; /* 1 = interactive line discipline + echo */
+  uint8_t sftp_active;           /* 1 after subsystem "sftp"; channel data is SFTP */
   uint8_t ssh_welcome_sent;     /* 1 after welcome+prompt sent (idempotent) */
   uint8_t shell_ignore_next_lf;  /* after CR, ignore one LF (CRLF) */
   uint16_t shell_line_len;
@@ -212,6 +214,10 @@ extern uint32_t ssh_suppress_log_mirror_to_session;
 /* While a shell command mirrors output over SSH, poll NIC + drain WINDOW_ADJUST
  * from rx_buf (safe to call from ping / long-running commands). */
 void ssh_flow_pump_from_shell(void);
+
+/* Send bytes as SSH_MSG_CHANNEL_DATA on the session channel (SFTP, etc.). */
+void ssh_channel_write(struct ssh_connection *conn, const uint8_t *data,
+                       uint32_t len);
 
 /* Raw stdin for interactive programs (editor) while a remote SSH command runs.
  * Channel bytes are diverted from the line editor into this ring. */
