@@ -561,6 +561,21 @@ test-kdf: tools/kdf_selftest_host.c
 	@mkdir -p build
 	$(CC_HOST) -o build/kdf_selftest tools/kdf_selftest_host.c && ./build/kdf_selftest
 
+# Host gateway so Cursor Remote-SSH → Host `ajos` sees the guest VFS + shell.
+# Guest must already be running (make run-console-file). See docs/CURSOR_REMOTE.md.
+cursor-remote:
+	chmod +x tools/ajos-cursor-remote/setup.sh tools/ajos-cursor-remote/stop.sh tools/ajos-cursor-remote/guest-ssh.sh tools/ajos-cursor-remote/test-sshfs.sh
+	./tools/ajos-cursor-remote/setup.sh
+
+cursor-remote-stop:
+	chmod +x tools/ajos-cursor-remote/stop.sh
+	./tools/ajos-cursor-remote/stop.sh
+
+# sshfs smoke test (skips cleanly if FUSE/sshfs cannot mount).
+test-sshfs:
+	chmod +x tools/ajos-cursor-remote/test-sshfs.sh
+	./tools/ajos-cursor-remote/test-sshfs.sh
+
 # QEMU user-net: ping 10.0.2.2 should work; ping to public IPs often times out (ICMP not forwarded).
 test-net: force-clean-serial
 	-pkill -9 qemu-system-i386 2>/dev/null || true
@@ -572,4 +587,4 @@ test-net: force-clean-serial
 	@echo "--- Running network autotest in QEMU (see kernel AJOS_NET_AUTOTEST) ---"
 	python3 tools/net_autotest.py
 
-.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net force-clean-serial force-clean-standard
+.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net test-sshfs cursor-remote cursor-remote-stop force-clean-serial force-clean-standard

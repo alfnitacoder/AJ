@@ -2256,6 +2256,165 @@ int fat12_delete_file(const char *path) {
   return 0;
 }
 
+int fat12_rmdir(const char *path) {
+  fat12_ctx ctx;
+  const char *p;
+  const char *filename;
+  size_t fn_len;
+  uint16_t target_dir;
+  uint8_t *dir_buf = 0;
+  uint32_t dir_bytes = 0;
+  uint32_t entries;
+  uint32_t i;
+
+  if (!path)
+    return 0;
+  p = skip_spaces(path);
+  if (*p == '\0' || (*p == '/' && p[1] == '\0') || kstreq(p, ".") ||
+      kstreq(p, ".."))
+    return 0;
+
+  if (!fat12_init(&ctx))
+    return 0;
+
+  filename = p;
+  fn_len = kstrlen(p);
+  for (size_t n = fn_len; n > 0; n--) {
+    if (p[n - 1] == '/') {
+      filename = p + n;
+      break;
+    }
+  }
+  if (filename[0] == '\0' || kstreq(filename, ".") || kstreq(filename, "..")) {
+    fat12_deinit(&ctx);
+    return 0;
+  }
+
+  target_dir = (*p == '/') ? 0 : fat12_cwd_cluster;
+  if (filename != p && filename > p + 1) {
+    const char *dir_start = (*p == '/') ? p + 1 : p;
+    size_t dir_len = (size_t)((filename - 1) - dir_start);
+    if (dir_len > 0 && dir_len < 64) {
+      char dir_part[64];
+      int dok = 0;
+      uint16_t resolved;
+      kmemcpy(dir_part, dir_start, dir_len);
+      dir_part[dir_len] = '\0';
+      resolved = fat12_resolve_dir(&ctx, 0, dir_part, &dok);
+      if (!dok) {
+        fat12_deinit(&ctx);
+        return 0;
+      }
+      target_dir = resolved;
+    }
+  }
+
+  if ((target_dir == 0)
+          ? !fat12_read_root_dir(&ctx, &dir_buf, &dir_bytes)
+          : !fat12_read_dir_cluster(&ctx, target_dir, &dir_buf, &dir_bytes)) {
+    fat12_deinit(&ctx);
+    return 0;
+  }
+
+  entries = dir_bytes / 32u;
+  for (i = 0; i < entries; i++) {
+    struct fat12_dirent *e = (struct fat12_dirent *)(dir_buf + i * 32u);
+    uint16_t first;
+    uint8_t *child = 0;
+    uint32_t child_bytes = 0;
+    uint32_t centries;
+    uint32_t ci;
+    int empty = 1;
+    int match = 0;
+    if (e->name[0] == 0x00)
+      break;
+    if (e->name[0] == 0xE5 || (e->attr & 0x08) || e->attr == FAT_ATTR_LFN)
+      continue;
+    if (i > 0) {
+      char extracted[256];
+      if (fat_extract_lfn(dir_buf, i * 32u, extracted, sizeof(extracted)) &&
+          kstreq_local(extracted, filename))
+        match = 1;
+    }
+    if (!match) {
+      char n83[13];
+      fat12_format_name(e->name, n83);
+      if (kstreq_local_nocase(n83, filename))
+        match = 1;
+    }
+    if (!match)
+      continue;
+    if ((e->attr & 0x10) == 0) {
+      kfree(dir_buf);
+      fat12_deinit(&ctx);
+      return 0;
+    }
+
+    first = e->first_cluster_lo;
+    if (first >= 2) {
+      if (!fat12_read_dir_cluster(&ctx, first, &child, &child_bytes)) {
+        kfree(dir_buf);
+        fat12_deinit(&ctx);
+        return 0;
+      }
+      centries = child_bytes / 32u;
+      for (ci = 0; ci < centries; ci++) {
+        struct fat12_dirent *ce =
+            (struct fat12_dirent *)(child + ci * 32u);
+        char n83[13];
+        if (ce->name[0] == 0x00)
+          break;
+        if (ce->name[0] == 0xE5 || (ce->attr & 0x08) ||
+            ce->attr == FAT_ATTR_LFN)
+          continue;
+        fat12_format_name(ce->name, n83);
+        if (n83[0] == '.' && n83[1] == '\0')
+          continue;
+        if (n83[0] == '.' && n83[1] == '.' && n83[2] == '\0')
+          continue;
+        empty = 0;
+        break;
+      }
+      kfree(child);
+    }
+    if (!empty) {
+      kfree(dir_buf);
+      fat12_deinit(&ctx);
+      return 0;
+    }
+
+    {
+      uint32_t j = i;
+      while (j > 0) {
+        struct fat_lfn_dirent *lfn =
+            (struct fat_lfn_dirent *)(dir_buf + (j - 1) * 32u);
+        if (lfn->attr != FAT_ATTR_LFN)
+          break;
+        ((struct fat12_dirent *)lfn)->name[0] = 0xE5;
+        j--;
+      }
+    }
+    e->name[0] = 0xE5;
+    if (first >= 2)
+      fat12_free_chain(&ctx, first);
+    if (target_dir == 0) {
+      for (uint16_t s = 0; s < ctx.root_sectors; s++)
+        disk_write_sector(ctx.drive, ctx.root_lba + s,
+                          dir_buf + (uint32_t)s * 512u);
+    } else {
+      fat12_write_dir_cluster(&ctx, target_dir, dir_buf, dir_bytes);
+    }
+    fat12_flush_fat(&ctx);
+    kfree(dir_buf);
+    fat12_deinit(&ctx);
+    return 1;
+  }
+
+  kfree(dir_buf);
+  fat12_deinit(&ctx);
+  return 0;
+}
+
 void cmd_rm(const char *arg) {
   const char *s = skip_spaces(arg);
   if (*s == '\0') {

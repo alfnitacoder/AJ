@@ -43,6 +43,7 @@ trap cleanup EXIT
 PUT_SRC="${WORKDIR}/put-src.txt"
 GET_README="${WORKDIR}/got-readme.txt"
 GET_PUT="${WORKDIR}/got-put.txt"
+GET_REN="${WORKDIR}/got-ren.txt"
 OUT="${WORKDIR}/out"
 ERR="${WORKDIR}/err"
 CMDS="${WORKDIR}/cmds"
@@ -54,6 +55,9 @@ get README.TXT ${GET_README}
 put ${PUT_SRC} /tmp/sftptest.txt
 ls /tmp
 get /tmp/sftptest.txt ${GET_PUT}
+rename /tmp/sftptest.txt /tmp/sftprenamed.txt
+get /tmp/sftprenamed.txt ${GET_REN}
+rm /tmp/sftprenamed.txt
 bye
 EOF
 
@@ -109,6 +113,13 @@ else
   echo "✓ put/get round-trip of /tmp/sftptest.txt"
 fi
 
+if ! grep -q "hello-from-sftp-test" "${GET_REN}" 2>/dev/null; then
+  echo "✗ rename/get of /tmp/sftprenamed.txt failed"
+  FAIL=1
+else
+  echo "✓ rename/get round-trip of /tmp/sftprenamed.txt"
+fi
+
 if [ "${FAIL}" -ne 0 ]; then
   echo ""
   echo "✗ SFTP test failed. Check:"
@@ -119,5 +130,5 @@ if [ "${FAIL}" -ne 0 ]; then
 fi
 
 echo ""
-echo "✓ SFTP ls/get/put succeeded"
+echo "✓ SFTP ls/get/put/rename succeeded"
 exit 0

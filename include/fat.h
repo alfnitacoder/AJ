@@ -163,6 +163,8 @@ void cmd_cp(const char *path);
 void cmd_touch(const char *arg);
 /* Delete a file by path (LFN-aware, frees its cluster chain). */
 int fat12_delete_file(const char *path);
+/* Remove an empty directory (not ".", "..", or the volume root). */
+int fat12_rmdir(const char *path);
 void cmd_rm(const char *arg);
 void cmd_grep(const char *arg);
 void cmd_head(const char *arg);
