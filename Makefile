@@ -441,6 +441,16 @@ run-console-qemu: run-console-img
 	sleep 1
 	$(QEMU_RUN) -m 512M -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -nographic -monitor none -serial stdio -no-reboot
 
+# QEMU with serial log file instead of stdio. stdio serial can stall the guest
+# during SSH (KEX chatter vs a blocking pipe). Use this for SSH/SFTP tests.
+# Console: tail -f build/guest.log
+run-console-file: run-console-img
+	-pkill -9 qemu-system-i386 2>/dev/null || true
+	sleep 1
+	@mkdir -p build
+	$(QEMU_RUN) -m 512M -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -display none -serial file:build/guest.log -no-reboot
+	@echo "QEMU running. Serial: build/guest.log  SSH: 127.0.0.1:$(HOST_SSH_PORT)"
+
 # Alternative: -display none (use if -nographic segfaults on macOS).
 run-console-qemu-alt: run-console-img
 	-pkill -9 qemu-system-i386 2>/dev/null || true
@@ -562,4 +572,4 @@ test-net: force-clean-serial
 	@echo "--- Running network autotest in QEMU (see kernel AJOS_NET_AUTOTEST) ---"
 	python3 tools/net_autotest.py
 
-.PHONY: all clean run run-console run-console-img run-console-qemu run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net force-clean-serial force-clean-standard
+.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net force-clean-serial force-clean-standard

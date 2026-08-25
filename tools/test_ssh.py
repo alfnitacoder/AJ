@@ -221,12 +221,6 @@ def main():
 
         # SFTP: list, get a known FAT file, put/get via ramfs /tmp
         def run_sftp_batch(batch_text, timeout=60):
-            import tempfile
-
-            td = tempfile.mkdtemp(prefix="ajos-sftp-")
-            batch_path = os.path.join(td, "batch")
-            with open(batch_path, "w", encoding="utf-8") as f:
-                f.write(batch_text)
             sftp = [
                 "sftp",
                 "-o",
@@ -241,15 +235,14 @@ def main():
                 "PubkeyAuthentication=no",
                 "-P",
                 str(target_port),
-                "-b",
-                batch_path,
                 f"{target_user}@{target_host}",
             ]
             cmd = [sshpass_bin, "-p", target_password] + sftp
-            print("\n[SFTP] batch:\n" + batch_text.rstrip())
+            print("\n[SFTP] commands:\n" + batch_text.rstrip())
             try:
                 p = subprocess.run(
                     cmd,
+                    input=batch_text,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -281,7 +274,8 @@ def main():
             f"get README.TXT {got_readme}\n"
             f"put {put_src} /tmp/sftptest.txt\n"
             f"ls /tmp\n"
-            f"get /tmp/sftptest.txt {got_put}\n",
+            f"get /tmp/sftptest.txt {got_put}\n"
+            f"bye\n",
             60,
         )
         sftp_ok = sftp_rc == 0

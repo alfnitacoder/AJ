@@ -1633,8 +1633,9 @@ int fat12_mkdir(const char *fn) {
   return ok;
 }
 
-int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
-                              uint8_t **out_buf, uint32_t *out_size) {
+int fat12_read_file_to_ram_ex_max(fat12_ctx *ctx, const char *path,
+                                  uint8_t **out_buf, uint32_t *out_size,
+                                  uint32_t max_size) {
   if (!ctx)
     return 0;
   const char *p = skip_spaces(path);
@@ -1670,10 +1671,12 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
     }
   }
   /* Cap size to avoid huge allocations from corrupt directory entries */
-  const uint32_t max_read_size = 256u * 1024u * 1024u; // 256MB for large models
+  const uint32_t default_max = 256u * 1024u * 1024u; // 256MB for large models
+  if (max_size == 0 || max_size > default_max)
+    max_size = default_max;
   uint32_t read_size = ent.size ? ent.size : 1u;
-  if (read_size > max_read_size)
-    read_size = max_read_size;
+  if (read_size > max_size)
+    read_size = max_size;
   uint8_t *buf = (uint8_t *)kmalloc(read_size);
   if (!buf) {
     return 0;
@@ -1681,10 +1684,16 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
   uint32_t written = 0;
   uint16_t cluster = ent.first_cluster_lo;
   uint8_t sec[512];
+  uint8_t spc = ctx->bpb.sectors_per_cluster;
+  if (spc == 0)
+    spc = 1;
+  uint32_t hops = 0;
   while (cluster >= 2 && !fat_is_eoc(ctx, cluster) && written < read_size) {
+    /* Cyclic or corrupt FAT must not wedge SSH/SFTP inside CHANNEL_DATA. */
+    if (++hops > 1048576u)
+      break;
     uint32_t lba = fat12_cluster_lba(ctx, cluster);
-    for (uint8_t s = 0; s < ctx->bpb.sectors_per_cluster && written < read_size;
-         s++) {
+    for (uint8_t s = 0; s < spc && written < read_size; s++) {
       if (!disk_read_sector(ctx->drive, lba + s, sec)) {
         kfree(buf);
         return 0;
@@ -1694,19 +1703,30 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
       mem_copy(buf + written, sec, to_copy);
       written += to_copy;
     }
-    cluster = fat_get_entry(ctx, cluster);
+    uint16_t next = fat_get_entry(ctx, cluster);
+    if (next == cluster)
+      break;
+    cluster = next;
   }
   *out_buf = buf;
   *out_size = written;
   return 1;
 }
 
+int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
+                              uint8_t **out_buf, uint32_t *out_size) {
+  return fat12_read_file_to_ram_ex_max(ctx, path, out_buf, out_size,
+                                       256u * 1024u * 1024u);
+}
+
 int fat12_read_file_to_ram(const char *path, uint8_t **out_buf,
                            uint32_t *out_size) {
   extern uint32_t ssh_suppress_log_mirror_to_session;
-  /* Don't mirror FAT/disk debug into SSH mid-read. */
+  /* Don't mirror FAT/disk debug into SSH mid-read.
+   * Static ctx: fat12_ctx is ~17KB (FAT sector cache). Putting it on the
+   * stack from SSH/SFTP CHANNEL_DATA has overflowed the kernel stack. */
   ssh_suppress_log_mirror_to_session++;
-  fat12_ctx ctx;
+  static fat12_ctx ctx;
   if (!fat12_init(&ctx))
   {
     ssh_suppress_log_mirror_to_session--;

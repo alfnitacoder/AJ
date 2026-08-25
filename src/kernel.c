@@ -8723,7 +8723,7 @@ void kernel_main()
   // user_init() moved to after filesystem_init() - it needs to read /etc/passwd
   http_init();
   log_writestring("[INIT] http_init done\n");
-  log_writestring("[INIT] ssh_init deferred (boot stability mode)\n");
+  log_writestring("[INIT] ssh_init deferred until after filesystem/network\n");
   dhcpd_init();
   log_writestring("[INIT] dhcpd_init done\n");
   dnsd_init();
@@ -8775,6 +8775,13 @@ void kernel_main()
   log_writestring("Configuring network...\n");
   network_auto_setup();
   outb(0x3F8, (uint8_t)'N'); /* Network setup done */
+
+  /* Listen on :22 after FS + static IP are up so an external agent can SSH/SFTP
+   * without a serial login. Early-boot ssh_init was deferred for stability. */
+  {
+    extern void ssh_init(void);
+    ssh_init();
+  }
 
   log_writestring(
       "[INIT] All initialization complete! About to show login prompt...\n");

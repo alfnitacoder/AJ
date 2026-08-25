@@ -142,6 +142,11 @@ int fat12_read_file_to_ram(const char *path, uint8_t **out_buf,
                            uint32_t *out_size);
 int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
                               uint8_t **out_buf, uint32_t *out_size);
+/* Like fat12_read_file_to_ram_ex, but never allocates more than max_size.
+ * Caps a corrupt directory size and bounds the cluster walk. */
+int fat12_read_file_to_ram_ex_max(fat12_ctx *ctx, const char *path,
+                                  uint8_t **out_buf, uint32_t *out_size,
+                                  uint32_t max_size);
 
 void fat12_cwd_set_root(void);
 void fat12_cwd_push(const char *seg);

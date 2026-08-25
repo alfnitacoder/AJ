@@ -1,8 +1,17 @@
 #!/bin/bash
 # Test OpenSSH sftp(1) against a running AJOS guest.
-# Start the guest first: make run-console
+#
+# Start the guest first. Prefer file serial so the guest does not stall:
+#   make run-console-file
+#   tail -f build/guest.log   # wait for "[SSHD] Server started on port 22"
+# Then:
+#   ./test_sftp.sh
+#
+# `make run-console` (stdio serial) also works if the pipe is drained, but
+# SSH/SFTP is more reliable with run-console-file.
 #
 # Exercises ls / get / put against the FAT/VFS tree (README.TXT, /tmp, ...).
+# Do not use sftp -b: that enables SSH BatchMode and disables password auth.
 
 set -u
 
@@ -10,7 +19,7 @@ HOST="${AJOS_SSH_HOST:-127.0.0.1}"
 PORT="${HOST_SSH_PORT:-9022}"
 USER="${AJOS_SSH_USER:-user}"
 PASS="${AJOS_SSH_PASSWORD:-pass}"
-TIMEOUT_SEC="${SFTP_TEST_TIMEOUT:-20}"
+TIMEOUT_SEC="${SFTP_TEST_TIMEOUT:-25}"
 
 echo "Attempting SFTP into AJOS..."
 echo "Host: ${HOST}"
@@ -22,6 +31,10 @@ if ! command -v sftp >/dev/null 2>&1; then
   echo "✗ sftp not found (install openssh-client)"
   exit 1
 fi
+if ! command -v sshpass >/dev/null 2>&1; then
+  echo "✗ sshpass not found (needed for non-interactive password auth)"
+  exit 1
+fi
 
 WORKDIR="$(mktemp -d /tmp/ajos-sftp-XXXXXX)"
 cleanup() { rm -rf "${WORKDIR}"; }
@@ -30,47 +43,37 @@ trap cleanup EXIT
 PUT_SRC="${WORKDIR}/put-src.txt"
 GET_README="${WORKDIR}/got-readme.txt"
 GET_PUT="${WORKDIR}/got-put.txt"
-BATCH="${WORKDIR}/batch"
 OUT="${WORKDIR}/out"
 ERR="${WORKDIR}/err"
+CMDS="${WORKDIR}/cmds"
 echo "hello-from-sftp-test" > "${PUT_SRC}"
 
-cat > "${BATCH}" <<EOF
+cat > "${CMDS}" <<EOF
 ls
 get README.TXT ${GET_README}
 put ${PUT_SRC} /tmp/sftptest.txt
 ls /tmp
 get /tmp/sftptest.txt ${GET_PUT}
+bye
 EOF
 
-SFTP_ARGS=(
+SFTP_OPTS=(
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
   -o PreferredAuthentications=password
   -o PubkeyAuthentication=no
   -o ConnectTimeout=10
   -P "${PORT}"
-  -b "${BATCH}"
-  "${USER}@${HOST}"
 )
 
-if command -v sshpass >/dev/null 2>&1; then
-  CMD=(sshpass -p "${PASS}" sftp "${SFTP_ARGS[@]}")
-else
-  ASK="${WORKDIR}/askpass"
-  printf '#!/bin/sh\nprintf %%s "%s"\n' "${PASS}" > "${ASK}"
-  chmod +x "${ASK}"
-  export DISPLAY="${DISPLAY:-:0}"
-  export SSH_ASKPASS="${ASK}"
-  export SSH_ASKPASS_REQUIRE=force
-  CMD=(sftp "${SFTP_ARGS[@]}")
-fi
-
+# Feed commands on stdin (not sftp -b) so sshpass can answer the password prompt.
 if command -v timeout >/dev/null 2>&1; then
-  timeout "${TIMEOUT_SEC}" "${CMD[@]}" >"${OUT}" 2>"${ERR}"
+  timeout "${TIMEOUT_SEC}" sshpass -p "${PASS}" sftp "${SFTP_OPTS[@]}" \
+    "${USER}@${HOST}" < "${CMDS}" >"${OUT}" 2>"${ERR}"
   EXIT=$?
 else
-  "${CMD[@]}" >"${OUT}" 2>"${ERR}"
+  sshpass -p "${PASS}" sftp "${SFTP_OPTS[@]}" \
+    "${USER}@${HOST}" < "${CMDS}" >"${OUT}" 2>"${ERR}"
   EXIT=$?
 fi
 
