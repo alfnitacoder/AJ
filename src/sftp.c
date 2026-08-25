@@ -352,8 +352,11 @@ static uint8_t sftp_pkt_scratch[16384];
 static void sftp_reply(struct ssh_connection *conn, const uint8_t *payload,
                        uint32_t plen)
 {
+  uint8_t small[512];
   uint8_t *pkt;
-  if (4u + plen <= sizeof(sftp_pkt_scratch))
+  if (4u + plen <= sizeof(small))
+    pkt = small;
+  else if (4u + plen <= sizeof(sftp_pkt_scratch))
     pkt = sftp_pkt_scratch;
   else
     return;
@@ -1017,7 +1020,6 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
     buf[0] = SSH_FXP_VERSION;
     sftp_wr_u32(buf + 1, SFTP_VERSION);
     sftp_reply(conn, buf, 5);
-    log_writestring("[SFTP] INIT -> VERSION 3\n");
     return;
   }
   if (len < 5)
@@ -1201,15 +1203,8 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
     {
       h->size = 0;
       h->dirty = 1;
-      h->load_tried = 1; /* truncated/new: do not populate from disk */
+      h->load_tried = 1;
     }
-    log_writestring("[SFTP] OPEN ");
-    log_writestring(canon);
-    log_writestring(" flags=");
-    log_write_u32(flags);
-    log_writestring(" size=");
-    log_write_u32(h->size);
-    log_putchar('\n');
     sftp_send_handle(conn, id, h->id);
     return;
   }
@@ -1432,7 +1427,6 @@ int sftp_session_init(struct ssh_connection *conn)
   s->conn = conn;
   conn->sftp_active = 1;
   (void)slot;
-  log_writestring("[SFTP] session started\n");
   return 1;
 }
 
