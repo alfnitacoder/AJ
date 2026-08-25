@@ -35,6 +35,20 @@ extern void log_putchar(char c);
 extern void *kmalloc(uint32_t size);
 extern void kfree(void *ptr);
 
+/* RSA-2048 signing dumps kilobytes of hex to serial on every SSH host-key
+ * signature. That stalls QEMU (even with -serial file:) and freezes SFTP/SSH
+ * after KEX. Restore with -DAJOS_CRYPTO_VERBOSE. */
+#ifndef AJOS_CRYPTO_VERBOSE
+static void crypto_log_writestring(const char *s) { (void)s; }
+static void crypto_log_write_u32(uint32_t v) { (void)v; }
+static void crypto_log_write_hex8(uint8_t v) { (void)v; }
+static void crypto_log_putchar(char c) { (void)c; }
+#define log_writestring crypto_log_writestring
+#define log_write_u32 crypto_log_write_u32
+#define log_write_hex8 crypto_log_write_hex8
+#define log_putchar crypto_log_putchar
+#endif
+
 // ============================================================================
 // SHA-512 Implementation (RFC 6234)
 // ============================================================================

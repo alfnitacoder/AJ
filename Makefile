@@ -11,7 +11,7 @@ BUILD_DIR = build
 # Disable SSE/MMX/x87 so the kernel runs on the QEMU i386 CPU model.
 CFLAGS = -m32 -march=i386 -mno-sse -mno-sse2 -mno-mmx -mno-80387 -msoft-float -fno-pie -fno-stack-protector -nostdlib -nostdinc -fno-builtin -fno-pic -I$(INC_DIR)
 ASFLAGS = -f elf32
-LDFLAGS = -m elf_i386 -T $(BUILD_DIR)/linker.ld
+LDFLAGS = -m elf_i386 -T kernel/linker.ld
 # LLM uses x87 FPU (no -msoft-float) - toolchain lacks i386 soft-float libgcc
 LLM_CFLAGS = -m32 -march=i386 -mno-sse -mno-sse2 -mno-mmx -fno-pie -fno-stack-protector -nostdlib -nostdinc -fno-builtin -fno-pic -I$(INC_DIR)
 
@@ -36,6 +36,7 @@ DNS_SRC = $(SRC_DIR)/dns.c
 NETCFG_SRC = $(SRC_DIR)/netcfg.c
 HTTP_SRC = $(SRC_DIR)/http.c
 SSH_SRC = $(SRC_DIR)/ssh.c
+SFTP_SRC = $(SRC_DIR)/sftp.c
 DHCPD_SRC = $(SRC_DIR)/dhcpd.c
 DNSD_SRC = $(SRC_DIR)/dnsd.c
 AUTH_SRC = $(SRC_DIR)/auth.c
@@ -85,6 +86,7 @@ DNS_OBJ = $(BUILD_DIR)/dns.o
 NETCFG_OBJ = $(BUILD_DIR)/netcfg.o
 HTTP_OBJ = $(BUILD_DIR)/http.o
 SSH_OBJ = $(BUILD_DIR)/ssh.o
+SFTP_OBJ = $(BUILD_DIR)/sftp.o
 DHCPD_OBJ = $(BUILD_DIR)/dhcpd.o
 DNSD_OBJ = $(BUILD_DIR)/dnsd.o
 BROWSER_OBJ = $(BUILD_DIR)/browser.o
@@ -251,6 +253,9 @@ $(USER_OBJ): $(USER_SRC)
 $(SSH_OBJ): $(SSH_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(SFTP_OBJ): $(SFTP_SRC) $(INC_DIR)/sftp.h $(INC_DIR)/ssh.h $(INC_DIR)/vfs.h $(INC_DIR)/fat.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(EDITOR_OBJ): $(EDITOR_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -301,7 +306,7 @@ $(BUILD_DIR)/openssh_ssherr.o: $(SRC_DIR)/openssh/ssherr.c
 
 
 # LLM (llm.o llm_math.o llm_inference.o) temporarily not linked — re-add $(LLM_OBJ) to restore.
-$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(BROWSER_OBJ) $(TLS_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ)
+$(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(SFTP_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(BROWSER_OBJ) $(TLS_OBJ) $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ) | kernel/linker.ld
 	@echo "Linking kernel.elf (may take 30-60s)..."
 	$(LD) $(LDFLAGS) -o $@ $^
 
@@ -436,6 +441,16 @@ run-console-qemu: run-console-img
 	sleep 1
 	$(QEMU_RUN) -m 512M -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -nographic -monitor none -serial stdio -no-reboot
 
+# QEMU with serial log file instead of stdio. stdio serial can stall the guest
+# during SSH (KEX chatter vs a blocking pipe). Use this for SSH/SFTP tests.
+# Console: tail -f build/guest.log
+run-console-file: run-console-img
+	-pkill -9 qemu-system-i386 2>/dev/null || true
+	sleep 1
+	@mkdir -p build
+	$(QEMU_RUN) -m 512M -boot a -drive file=$(RUN_OS_IMG),format=raw,if=floppy -drive file=$(DATA_IMG),format=raw,if=ide -netdev user,id=n0,hostfwd=tcp::$(HOST_HTTP_PORT)-10.0.2.15:80,hostfwd=tcp::$(HOST_SSH_PORT)-10.0.2.15:22 -device e1000,netdev=n0 -display none -serial file:build/guest.log -no-reboot
+	@echo "QEMU running. Serial: build/guest.log  SSH: 127.0.0.1:$(HOST_SSH_PORT)"
+
 # Alternative: -display none (use if -nographic segfaults on macOS).
 run-console-qemu-alt: run-console-img
 	-pkill -9 qemu-system-i386 2>/dev/null || true
@@ -471,7 +486,7 @@ install-qemu-mac:
 	@echo "Done. Run: make run-console"
 
 force-clean-serial:
-	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(AJLANG_OBJ) $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
+	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(SFTP_OBJ) $(AJLANG_OBJ) $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
 
 # Standard targets should also clean potentially serial-polluted objects
 force-clean-standard:
@@ -557,4 +572,4 @@ test-net: force-clean-serial
 	@echo "--- Running network autotest in QEMU (see kernel AJOS_NET_AUTOTEST) ---"
 	python3 tools/net_autotest.py
 
-.PHONY: all clean run run-console run-console-img run-console-qemu run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net force-clean-serial force-clean-standard
+.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net force-clean-serial force-clean-standard

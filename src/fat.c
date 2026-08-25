@@ -1204,7 +1204,9 @@ int fat12_write_file_ex(fat12_ctx *ctx, const char *fn, const uint8_t *data,
 
   uint8_t name83[11];
   fat12_to_83(filename, name83);
-  uint16_t target_dir = fat12_cwd_cluster;
+  /* Absolute paths (leading '/') are rooted at the volume root, not cwd.
+   * Without this, SFTP put of /FILE.TXT followed a serial-console `cd`. */
+  uint16_t target_dir = (*fn == '/') ? 0 : fat12_cwd_cluster;
   if (filename != fn && filename > fn + 1) {
     /* Path has directory - resolve it (e.g. "etc/PASSWD" -> write to etc) */
     const char *dir_start = (*fn == '/') ? fn + 1 : fn;
@@ -1631,8 +1633,9 @@ int fat12_mkdir(const char *fn) {
   return ok;
 }
 
-int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
-                              uint8_t **out_buf, uint32_t *out_size) {
+int fat12_read_file_to_ram_ex_max(fat12_ctx *ctx, const char *path,
+                                  uint8_t **out_buf, uint32_t *out_size,
+                                  uint32_t max_size) {
   if (!ctx)
     return 0;
   const char *p = skip_spaces(path);
@@ -1668,10 +1671,12 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
     }
   }
   /* Cap size to avoid huge allocations from corrupt directory entries */
-  const uint32_t max_read_size = 256u * 1024u * 1024u; // 256MB for large models
+  const uint32_t default_max = 256u * 1024u * 1024u; // 256MB for large models
+  if (max_size == 0 || max_size > default_max)
+    max_size = default_max;
   uint32_t read_size = ent.size ? ent.size : 1u;
-  if (read_size > max_read_size)
-    read_size = max_read_size;
+  if (read_size > max_size)
+    read_size = max_size;
   uint8_t *buf = (uint8_t *)kmalloc(read_size);
   if (!buf) {
     return 0;
@@ -1679,10 +1684,21 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
   uint32_t written = 0;
   uint16_t cluster = ent.first_cluster_lo;
   uint8_t sec[512];
+  uint8_t spc = ctx->bpb.sectors_per_cluster;
+  if (spc == 0)
+    spc = 1;
+  uint32_t hops = 0;
+  uint32_t hop_max = (max_size / 256u) + 32u;
+  if (hop_max < 32u)
+    hop_max = 32u;
+  if (hop_max > 1048576u)
+    hop_max = 1048576u;
   while (cluster >= 2 && !fat_is_eoc(ctx, cluster) && written < read_size) {
+    /* Cyclic or corrupt FAT must not wedge SSH/SFTP inside CHANNEL_DATA. */
+    if (++hops > hop_max)
+      break;
     uint32_t lba = fat12_cluster_lba(ctx, cluster);
-    for (uint8_t s = 0; s < ctx->bpb.sectors_per_cluster && written < read_size;
-         s++) {
+    for (uint8_t s = 0; s < spc && written < read_size; s++) {
       if (!disk_read_sector(ctx->drive, lba + s, sec)) {
         kfree(buf);
         return 0;
@@ -1692,19 +1708,30 @@ int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
       mem_copy(buf + written, sec, to_copy);
       written += to_copy;
     }
-    cluster = fat_get_entry(ctx, cluster);
+    uint16_t next = fat_get_entry(ctx, cluster);
+    if (next == cluster)
+      break;
+    cluster = next;
   }
   *out_buf = buf;
   *out_size = written;
   return 1;
 }
 
+int fat12_read_file_to_ram_ex(fat12_ctx *ctx, const char *path,
+                              uint8_t **out_buf, uint32_t *out_size) {
+  return fat12_read_file_to_ram_ex_max(ctx, path, out_buf, out_size,
+                                       256u * 1024u * 1024u);
+}
+
 int fat12_read_file_to_ram(const char *path, uint8_t **out_buf,
                            uint32_t *out_size) {
   extern uint32_t ssh_suppress_log_mirror_to_session;
-  /* Don't mirror FAT/disk debug into SSH mid-read. */
+  /* Don't mirror FAT/disk debug into SSH mid-read.
+   * Static ctx: fat12_ctx is ~17KB (FAT sector cache). Putting it on the
+   * stack from SSH/SFTP CHANNEL_DATA has overflowed the kernel stack. */
   ssh_suppress_log_mirror_to_session++;
-  fat12_ctx ctx;
+  static fat12_ctx ctx;
   if (!fat12_init(&ctx))
   {
     ssh_suppress_log_mirror_to_session--;
@@ -2138,7 +2165,7 @@ int fat12_delete_file(const char *path) {
       break;
     }
   }
-  uint16_t target_dir = fat12_cwd_cluster;
+  uint16_t target_dir = (*path == '/') ? 0 : fat12_cwd_cluster;
   if (filename != path && filename > path + 1) {
     const char *dir_start = (*path == '/') ? path + 1 : path;
     size_t dir_len = (size_t)((filename - 1) - dir_start);

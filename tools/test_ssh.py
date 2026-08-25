@@ -6,6 +6,7 @@ Uses sshpass (if installed) with AJOS_SSH_PASSWORD (default: pass).
 
 Checks:
   - echo, whoami, uname, ls (must succeed)
+  - sftp ls / get README.TXT / put+get round-trip
   - ping 10.0.2.2 (must see at least one ICMP reply — QEMU user-net gateway)
   - ping 1.1.1.1 (must finish ping statistics; 100%% loss is OK — ICMP often not forwarded)
 
@@ -216,6 +217,83 @@ def main():
 
         ok, _ = check("ls", ["ls"], 60)
         if not ok:
+            return 1
+
+        # SFTP: list, get a known FAT file, put/get via ramfs /tmp
+        def run_sftp_batch(batch_text, timeout=60):
+            sftp = [
+                "sftp",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "PreferredAuthentications=password",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-P",
+                str(target_port),
+                f"{target_user}@{target_host}",
+            ]
+            cmd = [sshpass_bin, "-p", target_password] + sftp
+            print("\n[SFTP] commands:\n" + batch_text.rstrip())
+            try:
+                p = subprocess.run(
+                    cmd,
+                    input=batch_text,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as e:
+                print(f"[SFTP] TIMEOUT after {timeout}s")
+                if e.stdout:
+                    print(e.stdout[-2000:])
+                return 124, ""
+            out = p.stdout or ""
+            if out.strip():
+                print(out.rstrip())
+            return p.returncode, out
+
+        put_src = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ajos_sftp_put.txt")
+        got_readme = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ajos_sftp_readme.txt")
+        got_put = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ajos_sftp_got.txt")
+        with open(put_src, "w", encoding="utf-8") as f:
+            f.write("hello-from-sftp-test\n")
+        for path in (got_readme, got_put):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+
+        sftp_rc, _ = run_sftp_batch(
+            f"ls\n"
+            f"get README.TXT {got_readme}\n"
+            f"put {put_src} /tmp/sftptest.txt\n"
+            f"ls /tmp\n"
+            f"get /tmp/sftptest.txt {got_put}\n"
+            f"bye\n",
+            60,
+        )
+        sftp_ok = sftp_rc == 0
+        if sftp_ok:
+            try:
+                with open(got_readme, "rb") as f:
+                    sftp_ok = len(f.read()) > 0
+            except OSError:
+                sftp_ok = False
+        if sftp_ok:
+            try:
+                with open(got_put, encoding="utf-8") as f:
+                    sftp_ok = "hello-from-sftp-test" in f.read()
+            except OSError:
+                sftp_ok = False
+        results.append(("sftp ls/get/put", sftp_ok, sftp_rc))
+        if not sftp_ok:
+            print("[FAIL] SFTP ls/get/put did not succeed")
             return 1
 
         # Gateway ping — must see a reply (same expectation as make test-net)
