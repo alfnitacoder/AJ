@@ -3213,8 +3213,16 @@ void ssh_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len)
         ssh_drop_tcp_after_packet = 1;
         break;
       case SSH_MSG_CHANNEL_EOF:
-        /* Client half-closed channel; TCP may stay up until CHANNEL_CLOSE. */
-        log_writestring("[SSH] Client CHANNEL_EOF (ignored)\n");
+        /* OpenSSH sftp(1) bye: client EOF, then waits for our EOF/CLOSE. */
+        if (conn->sftp_active && conn->has_client_channel)
+        {
+          sftp_process_pending(conn);
+          uint8_t ec[4];
+          ssh_write_u32(ec, conn->client_channel);
+          ssh_send_packet(conn, SSH_MSG_CHANNEL_EOF, ec, 4);
+          ssh_send_packet(conn, SSH_MSG_CHANNEL_CLOSE, ec, 4);
+          sftp_session_close(conn);
+        }
         break;
       case SSH_MSG_CHANNEL_CLOSE:
         log_writestring("[SSH] Client CHANNEL_CLOSE, closing TCP\n");

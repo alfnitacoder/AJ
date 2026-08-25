@@ -525,6 +525,44 @@ static int sftp_dirent_from_raw(const struct fat12_dirent *e,
   return 1;
 }
 
+static int sftp_fat_list_buf(const uint8_t *dir_buf, uint32_t dir_bytes,
+                             struct sftp_dirent *ents, uint32_t max,
+                             uint32_t *out_n)
+{
+  uint32_t n = 0;
+  uint32_t entries;
+  uint32_t i;
+  if (!dir_buf || !ents || !out_n || max == 0)
+    return 0;
+  entries = dir_bytes / 32u;
+  for (i = 0; i < entries && n < max; i++)
+  {
+    const struct fat12_dirent *e =
+        (const struct fat12_dirent *)(dir_buf + i * 32u);
+    char formatted[256];
+    uint32_t k;
+    if (e->name[0] == 0x00)
+      break;
+    if (e->name[0] == 0xE5 || (e->attr & 0x08) || e->attr == FAT_ATTR_LFN)
+      continue;
+    fat12_display_name(dir_buf, i * 32u, formatted, sizeof(formatted));
+    if (formatted[0] == '\0' || sftp_is_dot_name(formatted))
+      continue;
+    k = 0;
+    while (formatted[k] && k + 1 < SFTP_NAME_MAX)
+    {
+      ents[n].name[k] = formatted[k];
+      k++;
+    }
+    ents[n].name[k] = '\0';
+    ents[n].is_dir = (e->attr & 0x10) ? 1 : 0;
+    ents[n].size = e->size;
+    n++;
+  }
+  *out_n = n;
+  return 1;
+}
+
 static int sftp_fat_list_sectors(uint8_t drive, uint32_t lba, uint16_t nsec,
                                  struct sftp_dirent *ents, uint32_t max,
                                  uint32_t *out_n)
@@ -565,8 +603,17 @@ static int sftp_fat_list(fat12_ctx *ctx, const char *fs_path,
   if (!ctx || !ents || !out_n)
     return 0;
   if (p[0] == '\0' || (p[0] == '/' && p[1] == '\0'))
+  {
+    uint32_t slba = 0, sbytes = 0;
+    const uint8_t *sbuf = 0;
+    /* Boot snapshot is the real floppy root (cache LBA ~533). fat_global_ctx
+     * root_lba can sit past the floppy cache; BIOS reads from SSH hang or
+     * return empty, so ls/STAT of /README.TXT fail. */
+    if (disk_get_floppy_root_snapshot(&slba, &sbuf, &sbytes) && sbuf && sbytes)
+      return sftp_fat_list_buf(sbuf, sbytes, ents, max, out_n);
     return sftp_fat_list_sectors(ctx->drive, ctx->root_lba, ctx->root_sectors,
                                  ents, max, out_n);
+  }
   {
     int dok = 0;
     const char *rp = p;
@@ -769,7 +816,10 @@ static int sftp_load_file(const char *canon, uint8_t **data, uint32_t *size)
   struct vfs_mount *m = &vfs->mounts[mount_id];
   if (m->fstype == VFS_FSTYPE_FAT)
   {
-    /* Long-lived boot FAT ctx. Do not fat12_init()/PMM-alloc from CHANNEL_DATA. */
+    /* Same path as `ssh ... cat`: fresh ctx + BPB. fat_global_ctx root_lba
+     * can miss the floppy cache and fail to find README.TXT. */
+    if (kstreq(m->mount_point, "/"))
+      return fat12_read_file_to_ram(fs_path, data, size);
     fat12_ctx *ctx = sftp_boot_fat(m);
     if (!ctx)
       return 0;
