@@ -58,3 +58,16 @@ If **QEMU segfaults on macOS** (e.g. "Segmentation fault: 11"), especially on **
 - `Makefile` - Build system
 - `README.md` - This file
 - **`docs/MEMORY.md`** — how `kmalloc`/PMM work, `mem` / `heap` commands, leak hints, CPU idle (`hlt`)
+- **`docs/CURSOR_REMOTE.md`** — Cursor Remote-SSH to Host `ajos` (host gateway + sshfs; the Cursor server cannot run inside AJOS)
+
+### SSH / SFTP / Cursor
+
+Guest account **`user` / `pass`**. QEMU forwards **`${HOST_SSH_PORT:-9022}` → guest :22**.
+
+```sh
+make run-console-file          # guest; wait for [SSHD] Server started on port 22
+./test_sftp.sh                 # OpenSSH sftp ls/get/put
+make cursor-remote             # sshfs + Host ajos gateway for Cursor Remote-SSH
+```
+
+You cannot run `cursor-server` inside AJOS (32-bit kernel, no Linux userspace). `make cursor-remote` runs it on the **host** and fronts the guest VFS + shell. Details: **[docs/CURSOR_REMOTE.md](docs/CURSOR_REMOTE.md)**.

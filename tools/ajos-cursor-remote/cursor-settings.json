@@ -1,0 +1,32 @@
+{
+  "terminal.integrated.defaultProfile.linux": "AJOS Guest",
+  "terminal.integrated.defaultProfile.osx": "AJOS Guest",
+  "terminal.integrated.profiles.linux": {
+    "AJOS Guest": {
+      "path": "bash",
+      "args": [
+        "-lc",
+        "exec \"${AJOS_GUEST_SSH:-guest-ssh.sh}\""
+      ]
+    },
+    "Host shell": {
+      "path": "bash",
+      "args": ["-l"]
+    }
+  },
+  "terminal.integrated.profiles.osx": {
+    "AJOS Guest": {
+      "path": "zsh",
+      "args": [
+        "-lc",
+        "exec \"${AJOS_GUEST_SSH:-guest-ssh.sh}\""
+      ]
+    },
+    "Host shell": {
+      "path": "zsh",
+      "args": ["-l"]
+    }
+  },
+  "remote.SSH.useLocalServer": true,
+  "remote.SSH.enableRemoteCommand": false
+}
