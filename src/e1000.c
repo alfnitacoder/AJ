@@ -53,12 +53,15 @@ typedef struct {
 } e1000_rings_t;
 
 static e1000_dev_t e1000_devices[MAX_E1000_DEVICES];
+static e1000_rings_t e1000_rings_storage[MAX_E1000_DEVICES]
+    __attribute__((aligned(4096)));
 static e1000_rings_t *e1000_rings[MAX_E1000_DEVICES];
 int e1000_device_count = 0;
-static int e1000_default_device = 0; // Default interface to use
+int e1000_default_device = 0; /* non-static: eth/arp select the TX NIC via this */
+int e1000_active_rx_device = -1; /* arrival NIC marker (arp/ip4 replies) */
 
 // Legacy compatibility: expose first device's MAC
-uint8_t e1000_mac[6] = {0, 0, 0, 0, 0, 0}; // Initialize to zeros
+uint8_t e1000_mac[MAX_E1000_DEVICES][6] = {{0,0,0,0,0,0},{0,0,0,0,0,0}}; // per-NIC MAC (ajlangweb dual-NIC)
 
 // Linux-inspired "NAPI-style" polling state:
 // - IRQ handler schedules polling and masks further NIC interrupts
@@ -212,7 +215,15 @@ int e1000_tx_send_raw(const uint8_t *frame, uint16_t len) {
   uint16_t original_len = len;
   if (len < 60)
     len = 60;
-  if (len > 1500)
+  /* Max Ethernet frame: 1518 (1522 w/ VLAN). The old limit of 1500 rejected
+   * standard full-MSS TCP segments (1460 payload -> 1514-byte frame, and even
+   * a 1456-payload segment -> 1510), silently dropping any reply larger than
+   * ~1446 bytes of payload. Combined with the once-only "len too big" log and
+   * the SSH retry loop giving up after 256 tries, this made every big SFTP
+   * reply (READDIR NAME, large DATA) vanish: the OpenSSH client, which has no
+   * SFTP timeouts, hung forever on `ls`. Hardware handles up to 16KB frames;
+   * keep the conservative 1518 boundary. */
+  if (len > 1518)
   {
     if (!logged_bad_len_once) {
       logged_bad_len_once = 1;
@@ -293,23 +304,26 @@ int e1000_tx_send_raw(const uint8_t *frame, uint16_t len) {
 
 static void e1000_irq_handler(struct regs *r) {
   (void)r;
-  if (e1000_device_count == 0 || !e1000_devices[0].present ||
-      (!e1000_devices[0].mmio && !e1000_devices[0].io_base)) {
+  if (e1000_device_count == 0)
     return;
-  }
-  e1000_dev_t *dev = &e1000_devices[0];
   const uint32_t REG_ICR = 0x00C0;
-  uint32_t icr = e1000_reg_read(dev, REG_ICR);
-  (void)icr;
-
-  // Schedule NAPI-style polling and mask interrupts so the timer/busy-wait poller
-  // can drain the RX ring with a bounded budget. This makes RX robust on
-  // emulators where IRQ delivery can be flaky (or bursts can cause storms).
-  if (!e1000_napi_scheduled) {
-    const uint32_t REG_IMC = 0x00D8;
-    e1000_reg_write(dev, REG_IMC, 0xFFFFFFFFu);
-    e1000_napi_scheduled = 1;
+  const uint32_t REG_IMC = 0x00D8;
+  /* Service every present NIC: either may signal RX (dual-NIC AJOS). */
+  for (int di = 0; di < e1000_device_count; di++) {
+    e1000_dev_t *dev = &e1000_devices[di];
+    if (!dev->present || (!dev->mmio && !dev->io_base))
+      continue;
+    uint32_t icr = e1000_reg_read(dev, REG_ICR);
+    (void)icr;
+    // Schedule NAPI-style polling and mask interrupts so the timer/busy-wait poller
+    // can drain the RX ring with a bounded budget. This makes RX robust on
+    // emulators where IRQ delivery can be flaky (or bursts can cause storms).
+    if (!e1000_napi_scheduled) {
+      e1000_reg_write(dev, REG_IMC, 0xFFFFFFFFu);
+    }
   }
+  if (!e1000_napi_scheduled)
+    e1000_napi_scheduled = 1;
 }
 
 static void e1000_rx_init(int dev_idx) {
@@ -407,6 +421,8 @@ int e1000_rx_poll_one(void) {
       }
       p->len = len;
       p->tot_len = len;
+      /* Mark the arrival NIC: arp replies leave via the same interface. */
+      e1000_active_rx_device = dev_idx;
       ethernet_input(p);
     } else {
       // #region agent log
@@ -659,13 +675,13 @@ void e1000_probe(void) {
         if (!(vendor == 0x8086u && (device == 0x100Eu || device == 0x1004u)))
           continue;
 
-        void *raw_ptr = kmalloc(sizeof(e1000_rings_t) + 4096);
-        if (!raw_ptr)
+        int dev_idx = e1000_device_count;
+        if (dev_idx < 0 || dev_idx >= MAX_E1000_DEVICES)
           continue;
-        e1000_rings[e1000_device_count] =
-            (e1000_rings_t *)(((uint32_t)raw_ptr + 4095u) & ~4095u);
-
-        int dev_idx = e1000_device_count++;
+        /* Static per-device rings: kmalloc of ~133KB per NIC was fragile
+         * early in boot; BSS storage is deterministic for MAX=2 devices. */
+        e1000_rings[dev_idx] = &e1000_rings_storage[dev_idx];
+        e1000_device_count++;
         e1000_dev_t *e = &e1000_devices[dev_idx];
         e->present = 1;
         e->enabled = 1;
@@ -684,7 +700,6 @@ void e1000_probe(void) {
             e->mmio_phys = (barv & 0xFFFFFFF0u);
         }
         e->irq_line = pci_cfg_read8((uint8_t)bus, dev, func, 0x3C);
-
         uint16_t cmd = pci_cfg_read16((uint8_t)bus, dev, func, 0x04);
         // Enable IO space, memory space, and bus mastering (16-bit write; do
         // not clobber the PCI status register).
@@ -724,9 +739,12 @@ void e1000_probe(void) {
             e->mac[4 + i] = (uint8_t)((rah >> (i * 8)) & 0xFF);
         }
 
+        /* Save per-device MAC for ALL devices (dual-NIC); dev0 keeps the
+         * legacy "global MAC" log. */
+        for (int i = 0; i < 6; i++)
+          e1000_mac[dev_idx][i] = e->mac[i];
+
         if (dev_idx == 0) {
-          for (int i = 0; i < 6; i++)
-            e1000_mac[i] = e->mac[i];
           log_writestring("e1000: set global MAC\n");
 
           log_writestring("[e1000] BARs: io_base=0x");
@@ -802,7 +820,7 @@ void cmd_ifconfig(const char *args) {
       }
       log_putchar('\n');
 
-      if (i == e1000_default_device) {
+      {
         log_writestring("  IP: ");
         log_write_u32((my_ip >> 24) & 0xFF);
         log_putchar('.');
@@ -883,7 +901,7 @@ void cmd_ifconfig(const char *args) {
       e1000_default_device = dev_idx;
       // Update global MAC for networking stack
       for (int i = 0; i < 6; i++) {
-        e1000_mac[i] = dev->mac[i];
+        e1000_mac[dev_idx][i] = dev->mac[i];
       }
       log_writestring(dev->name);
       log_writestring(": set as default interface\n");

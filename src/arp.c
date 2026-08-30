@@ -11,12 +11,15 @@ extern void log_writestring(const char *s);
 extern void log_write_hex32(uint32_t v);
 extern void log_write_u32(uint32_t v);
 extern void log_putchar(char c);
-extern uint8_t e1000_mac[6];
+extern uint8_t e1000_mac[2][6];
+extern int e1000_default_device;
 extern uint32_t pit_ticks;
 
 static arp_entry_t arp_cache[ARP_CACHE_SIZE];
+
+uint32_t arp_get_if_ip(int iface); /* forward: defined below */
 // A hardcoded static IP for AJOS in QEMU environment
-static uint32_t ajos_ip = 0; // Will be initialized to 10.0.2.15
+static uint32_t ajos_ip[2] = {0, 0}; // iface0/iface1 (dual-NIC AJOS)
 
 void arp_init(void) {
   for (int i = 0; i < ARP_CACHE_SIZE; i++) {
@@ -24,7 +27,7 @@ void arp_init(void) {
   }
   // 10.0.2.15 stored in network byte order format (matches ip4_init style)
   // On little-endian: 0x0A00020F = 10.0.2.15
-  ajos_ip = (10u << 24) | (0u << 16) | (2u << 8) | (15u);
+  ajos_ip[0] = (10u << 24) | (0u << 16) | (2u << 8) | (15u);
 }
 
 static void arp_update_cache(uint32_t ip, eth_addr_t *mac) {
@@ -92,7 +95,7 @@ void arp_input(struct pbuf *p) {
   // Update cache with sender info for all incoming ARP packets
   arp_update_cache(src_ip, &hdr->src_mac);
 
-  if (dst_ip != ajos_ip) {
+  if (dst_ip != ajos_ip[0] && dst_ip != ajos_ip[1]) {
     /*
     log_writestring("[ARP] Dropping (dst != ajos_ip: ");
     ...
@@ -107,12 +110,23 @@ void arp_input(struct pbuf *p) {
     return;
   }
 
+  /* Dual-NIC: answer on the arrival NIC with the asked IP as the source. */
+  extern int e1000_default_device;
+  extern int e1000_active_rx_device;
+  if (e1000_active_rx_device >= 0 && e1000_active_rx_device < 2)
+    e1000_default_device = e1000_active_rx_device;
+
   if (op == ARP_OP_REQUEST) {
     // Send reply
     hdr->opcode = htons(ARP_OP_REPLY);
     hdr->dst_mac = hdr->src_mac;
-    for (int i = 0; i < 6; i++)
-      hdr->src_mac.addr[i] = e1000_mac[i];
+    {
+      int txd = (e1000_default_device >= 0 && e1000_default_device < 2)
+                    ? e1000_default_device
+                    : 0;
+      for (int i = 0; i < 6; i++)
+        hdr->src_mac.addr[i] = e1000_mac[txd][i];
+    }
 
     uint32_t tmp = hdr->src_ip;
     hdr->src_ip = hdr->dst_ip;
@@ -164,11 +178,16 @@ int arp_query(uint32_t ip) {
   hdr->hlen = 6;
   hdr->plen = 4;
   hdr->opcode = htons(ARP_OP_REQUEST);
-  for (int i = 0; i < 6; i++) {
-    hdr->src_mac.addr[i] = e1000_mac[i];
-    hdr->dst_mac.addr[i] = 0; // ignored
+  {
+    int txd = (e1000_default_device >= 0 && e1000_default_device < 2)
+                  ? e1000_default_device
+                  : 0;
+    for (int i = 0; i < 6; i++) {
+      hdr->src_mac.addr[i] = e1000_mac[txd][i];
+      hdr->dst_mac.addr[i] = 0; // ignored
+    }
+    hdr->src_ip = htonl(arp_get_if_ip(txd));
   }
-  hdr->src_ip = htonl(ajos_ip);
   hdr->dst_ip = htonl(ip);
   p->len = sizeof(struct arp_hdr);
   p->tot_len = sizeof(struct arp_hdr);
@@ -191,11 +210,16 @@ uint8_t *arp_get_mac_at(int idx) {
              : NULL;
 }
 
-uint32_t arp_get_ajos_ip(void) { return ajos_ip; }
-void arp_set_ajos_ip(uint32_t ip) { ajos_ip = ip; }
+uint32_t arp_get_ajos_ip(void) { return ajos_ip[0]; }  /* compat: iface0 */
+uint32_t arp_get_if_ip(int iface) { return (iface >= 0 && iface < 2) ? ajos_ip[iface] : 0; }
+void arp_set_if_ip(int iface, uint32_t ip) { if (iface >= 0 && iface < 2) ajos_ip[iface] = ip; }
+void arp_set_ajos_ip(uint32_t ip) { ajos_ip[0] = ip; }
 void arp_get_ajos_mac(uint8_t *mac) {
+  int txd = (e1000_default_device >= 0 && e1000_default_device < 2)
+                ? e1000_default_device
+                : 0;
   for (int i = 0; i < 6; i++)
-    mac[i] = e1000_mac[i];
+    mac[i] = e1000_mac[txd][i];
 }
 
 int arp_get_mac_for_ip(uint32_t ip, eth_addr_t *out_mac) {

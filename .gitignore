@@ -8,3 +8,6 @@ reference/
 # Optional LLM weights (download via Makefile; too large for GitHub)
 data/STORIES*.BIN
 data/TOK*.BIN
+# User demo programs (built into build/, copied to data/ at image build)
+data/FORKDEMO.BIN
+data/CHILD.BIN

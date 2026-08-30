@@ -51,6 +51,22 @@ Expect El Torito: **BIOS**, **fd 1.4 MB**, boot image **`/boot.img`**.
 - Open **Console**; you should see SeaBIOS then AJOS boot (floppy/CD path).
 - If the guest “hangs” at CD boot, confirm **UEFI is disabled** and the VM is using **SeaBIOS**.
 
+## 4b. Install AJOS to the VM's disk (no live boot)
+
+Since the `installdisk` command exists, a Proxmox VM can run AJOS from its own
+disk instead of the live ISO:
+
+1. Add an **IDE disk** to the VM (any size >= 2 MB; the installer writes the
+   first 1.44 MB).
+2. Boot the ISO, log in (`user` / `pass`).
+3. Run **`installdisk`** - mirrors bootloader + kernel + filesystem onto the
+   disk (~1-3 min, ends with `[INSTALL] SUCCESS`).
+4. **Detach the ISO** (Hardware -> CD/DVD -> Remove) and reboot.
+5. The VM now boots AJOS standalone: SSH on :22, web on :80.
+
+> Tip: run `installdisk` from the **serial/console**, not SSH - the installer's
+> BIOS real-mode windows can starve the NIC and corrupt an active SSH stream.
+
 ## 5. Networking note
 
 AJOS defaults to **10.0.2.15** in `network_auto_setup()` (QEMU user-net style). On Proxmox you will usually use a **real** LAN — set IP/gateway/DNS via **`netcfg`** / **`NETWORK.CFG`** on the FAT image or adjust the kernel’s static setup for your lab.

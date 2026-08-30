@@ -123,6 +123,41 @@ int netcfg_load_from_buffer(const char *buf, int len) {
           sshd_update_listener_ip(ip);
         }
       }
+      // Parse "ip1 <address>" - second interface (dual-NIC AJOS)
+      else if (line_len > 4 && netcfg_strncmp(line_start, "ip1 ", 4) == 0) {
+        uint32_t ip1;
+        if (netcfg_parse_ip(line_start + 4, &ip1)) {
+          extern void arp_set_if_ip(int iface, uint32_t ip);
+          arp_set_if_ip(1, ip1);
+          log_writestring("[NetCfg] IP1: ");
+          log_write_u32((ip1 >> 24) & 0xFF);
+          log_putchar('.');
+          log_write_u32((ip1 >> 16) & 0xFF);
+          log_putchar('.');
+          log_write_u32((ip1 >> 8) & 0xFF);
+          log_putchar('.');
+          log_write_u32(ip1 & 0xFF);
+          log_putchar('\n');
+        } else {
+          log_writestring("[NetCfg] IP1 parse FAILED\n");
+        }
+      }
+      // Parse "netmask1 <address>" - second interface netmask
+      else if (line_len > 9 && netcfg_strncmp(line_start, "netmask1 ", 9) == 0) {
+        uint32_t nm1;
+        if (netcfg_parse_ip(line_start + 9, &nm1)) {
+          extern void ip4_set_netmask_ip(int iface, ip_addr_t mask);
+          ip4_set_netmask_ip(1, nm1);
+        }
+      }
+      // Parse "gateway1 <address>" - second interface gateway
+      else if (line_len > 9 && netcfg_strncmp(line_start, "gateway1 ", 9) == 0) {
+        uint32_t gw1;
+        if (netcfg_parse_ip(line_start + 9, &gw1)) {
+          extern void ip4_set_gateway_ip(int iface, ip_addr_t gw);
+          ip4_set_gateway_ip(1, gw1);
+        }
+      }
       // Parse "netmask <address>"
       else if (line_len > 8 && netcfg_strncmp(line_start, "netmask ", 8) == 0) {
         uint32_t netmask;

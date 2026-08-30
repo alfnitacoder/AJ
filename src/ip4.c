@@ -14,6 +14,7 @@ extern void log_putchar(char c);
 extern int arp_query(uint32_t ip);
 extern int arp_get_mac_for_ip(uint32_t ip, eth_addr_t *out_mac);
 extern uint32_t arp_get_ajos_ip(void);
+extern uint32_t arp_get_if_ip(int iface);
 // Extern DHCP negotiation state (so we can accept unicast ACKs before IP is
 // set)
 extern uint32_t dhcp_offered_ip;
@@ -25,6 +26,9 @@ static uint32_t ip4_policy_drop_count = 0;
 // Very small interface config (defaults for QEMU user-net)
 static uint32_t ip4_netmask = 0;
 static uint32_t ip4_gateway = 0;
+/* Dual-NIC: per-interface netmask/gateway (iface0 = primary, iface1 = second) */
+static uint32_t ip4_if_nm[2] = {0, 0};
+static uint32_t ip4_if_gw[2] = {0, 0};
 
 uint32_t ip4_get_rx_count(void) { return ip4_rx_count; }
 uint32_t ip4_get_tx_count(void) { return ip4_tx_count; }
@@ -80,9 +84,19 @@ void ip4_init(void) {
   ip4_gateway = 0x0A000202u; // 10.0.2.2
 }
 
-void ip4_set_netmask(ip_addr_t mask) { ip4_netmask = mask; }
+void ip4_set_netmask_ip(int iface, ip_addr_t mask) { if (iface == 0) ip4_netmask = mask; if (iface >= 0 && iface < 2) ip4_if_nm[iface] = mask; }
+void ip4_set_netmask(ip_addr_t mask) { ip4_set_netmask_ip(0, mask); }
 ip_addr_t ip4_get_netmask(void) { return ip4_netmask; }
-void ip4_set_gateway(ip_addr_t gw) { ip4_gateway = gw; }
+void ip4_set_gateway_ip(int iface, ip_addr_t gw) { if (iface == 0) ip4_gateway = gw; if (iface >= 0 && iface < 2) ip4_if_gw[iface] = gw; }
+
+uint32_t ip4_get_if_netmask(int iface) {
+  return (iface >= 0 && iface < 2) ? ip4_if_nm[iface] : 0;
+}
+
+uint32_t ip4_get_if_gw(int iface) {
+  return (iface >= 0 && iface < 2) ? ip4_if_gw[iface] : 0;
+}
+void ip4_set_gateway(ip_addr_t gw) { ip4_set_gateway_ip(0, gw); }
 ip_addr_t ip4_get_gateway(void) { return ip4_gateway; }
 
 uint16_t net_checksum(void *data, int len) {
@@ -179,6 +193,7 @@ void ip4_input(struct pbuf *p) {
   }
 
   ip_addr_t ajos_ip = arp_get_ajos_ip();
+  uint32_t ajos_ip1 = arp_get_if_ip(1);
   dst = ntohl(hdr->dst);
 
   // If we don't have an IP yet (0.0.0.0), we may still need to accept
@@ -189,8 +204,9 @@ void ip4_input(struct pbuf *p) {
   // - 0.0.0.0
   // - dhcp_offered_ip (if set)
   // - and anything else only if ajos_ip is configured
-  if (ajos_ip != 0) {
-    if (dst != ajos_ip && dst != IP_ADDR_BROADCAST && dst != IP_ADDR_LOOPBACK) {
+  if (ajos_ip != 0 || ajos_ip1 != 0) {
+    if (dst != ajos_ip && dst != ajos_ip1 && dst != IP_ADDR_BROADCAST &&
+        dst != IP_ADDR_LOOPBACK) {
       // Not for us
       pbuf_free(p);
       return;
@@ -252,7 +268,22 @@ int ip4_output_ttl(struct pbuf *p, ip_addr_t dst, uint8_t proto, uint8_t ttl) {
   }
 
   struct ip4_hdr *hdr = (struct ip4_hdr *)p->payload;
-  ip_addr_t ajos_ip = arp_get_ajos_ip();
+  /* Dual-NIC route selection: match dst against each interface's subnet.
+   * The matched interface supplies the source IP and the TX device. */
+  int route_if = 0;
+  for (int ri = 1; ri >= 0; ri--) {
+    uint32_t rip = arp_get_if_ip(ri);
+    uint32_t rnm = ip4_get_if_netmask(ri);
+    if (rip != 0 && rnm != 0 && (dst & rnm) == (rip & rnm)) {
+      route_if = ri;
+      break;
+    }
+  }
+  if (route_if == 0 && arp_get_if_ip(0) == 0 && arp_get_if_ip(1) != 0)
+    route_if = 1; /* iface0 unconfigured, iface1 has the only IP */
+  ip_addr_t ajos_ip = arp_get_if_ip(route_if);
+  if (route_if == 0)
+    ajos_ip = arp_get_ajos_ip(); /* legacy compat for iface0 */
 
   hdr->v_hl = 0x45; // v=4, hl=5 (20 bytes)
   hdr->tos = 0;
@@ -278,9 +309,15 @@ int ip4_output_ttl(struct pbuf *p, ip_addr_t dst, uint8_t proto, uint8_t ttl) {
   // This enables ping/DNS/etc to addresses outside 10.0.2.0/24 in QEMU
   // user-net.
   uint32_t next_hop = dst;
-  if (ajos_ip != 0 && ip4_netmask != 0 && ip4_gateway != 0) {
-    if ((dst & ip4_netmask) != (ajos_ip & ip4_netmask)) {
-      next_hop = ip4_gateway;
+  {
+    uint32_t nm = ip4_get_if_netmask(route_if);
+    uint32_t gw = ip4_get_if_gw(route_if);
+    if (nm == 0) nm = ip4_netmask;
+    if (gw == 0) gw = ip4_gateway;
+    if (ajos_ip != 0 && nm != 0 && gw != 0) {
+      if ((dst & nm) != (ajos_ip & nm)) {
+        next_hop = gw;
+      }
     }
   }
 
@@ -295,6 +332,9 @@ int ip4_output_ttl(struct pbuf *p, ip_addr_t dst, uint8_t proto, uint8_t ttl) {
     }
   }
 
+  extern int e1000_default_device;
+  if (route_if >= 0 && route_if < 2)
+    e1000_default_device = route_if;
   if (arp_get_mac_for_ip(next_hop, &eth_dst)) {
     int er = ethernet_output(p, &eth_dst, ETHTYPE_IP);
     return (er != 0) ? 0 : -1;

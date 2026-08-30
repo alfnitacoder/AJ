@@ -109,6 +109,9 @@ def lfn_entries(name: str, name83: bytes) -> list[bytes]:
     return out
 
 
+NETCFG_BYTES = b""
+
+
 def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | None = None, kernel_bin: bytes | None = None) -> bytearray:
     # Determine cluster size and FAT type
     # For a simple implementation: 
@@ -328,7 +331,7 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         add_root_entry_raw(dir_entry_83(b"TMP        ", 0x10, tmp_c))
         opt_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"OPT        ", 0x10, opt_c))
-        return www_c, opt_c
+        return www_c, opt_c, etc_c
 
     def add_root_entry_raw(entry: bytes) -> None:
         nonlocal root_idx
@@ -360,7 +363,8 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         first_cluster, size = alloc_file(f.data, f.name)
         add_root_entry(f.name, 0x20, first_cluster, size)
 
-    www_cluster, opt_cluster = add_system_dirs()
+    www_cluster, opt_cluster, etc_cluster = add_system_dirs()
+
 
     # Web root: repo www/*.html -> var/www/ in the image
     from pathlib import Path as _P
@@ -375,6 +379,22 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
         for pf in sorted(_P("opt").iterdir()):
             if pf.is_file() and pf.suffix == ".aj":
                 add_dir_file(opt_cluster, pf.name, pf.read_bytes())
+
+    # ajlangweb apps: repo webapp/* -> /webapp/ in the image; the HTTP server
+    # maps /app/<name> -> /webapp/<name>.aj (src/http.c http_handle_webapp).
+    if _P("webapp").is_dir():
+        webapp_c = alloc_dir_cluster(0)
+        add_root_entry_raw(dir_entry_83(b"WEBAPP     ", 0x10, webapp_c))
+        for wf in sorted(_P("webapp").iterdir()):
+            if wf.is_file():
+                add_dir_file(webapp_c, wf.name, wf.read_bytes())
+    # --netcfg: write the given file as /etc/NETWORK.CFG (static net config
+    # applied at boot by network_auto_setup). Only for server images; the
+    # default dev image keeps the QEMU user-net default (10.0.2.15).
+    if NETCFG_BYTES:
+        add_dir_file(etc_cluster, "NETWORK.CFG", NETCFG_BYTES)
+    for fn, data in NETCFG_DIR_FILES:
+        add_dir_file(etc_cluster, fn, data)
 
     img[fat1_lba * SECTOR_SIZE:(fat1_lba + sectors_per_fat) * SECTOR_SIZE] = fat
     img[fat2_lba * SECTOR_SIZE:(fat2_lba + sectors_per_fat) * SECTOR_SIZE] = fat
@@ -391,7 +411,21 @@ def main() -> int:
     parser.add_argument("--kernel", help="Kernel binary")
     parser.add_argument("--model", help="Path to model.bin")
     parser.add_argument("--size-mb", type=int, default=0, help="Total size in MB")
+    parser.add_argument("--netcfg", help="Write this file as /etc/NETWORK.CFG in the image")
+    parser.add_argument("--netcfg-dir", help="Stage every file in this dir as /etc/<name> in the image")
+    # (consumed below into NETCFG_BYTES; build_image writes it into /etc/)
     args = parser.parse_args()
+    global NETCFG_BYTES, NETCFG_DIR_FILES
+    NETCFG_BYTES = b""
+    NETCFG_DIR_FILES = []
+    if args.netcfg:
+        NETCFG_BYTES = open(args.netcfg, "rb").read()
+    if args.netcfg_dir:
+        import os as _os
+        for fn in sorted(_os.listdir(args.netcfg_dir)):
+            fp = _os.path.join(args.netcfg_dir, fn)
+            if _os.path.isfile(fp):
+                NETCFG_DIR_FILES.append((fn.upper(), open(fp, "rb").read()))
 
     files = []
     

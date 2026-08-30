@@ -3,8 +3,16 @@
 #include <stdint.h>
 
 // Heap constants
-#define HEAP_START 0x00400000u  // 4 MiB (Mapped in page_table1, safe from MMIO)
+// The heap must live ABOVE the kernel image+BSS: ebss has grown past the old
+// fixed 4MiB start, and heap allocations were silently overwriting kernel
+// globals (process table, buffers) -> "random" corruption. Start is computed
+// at init from the linker's ebss, page-aligned, with a floor for safety.
+// HEAP_SIZE must keep the heap below PMM_START (0x800000).
+#define HEAP_FLOOR 0x00500000u
 #define HEAP_SIZE (0x00100000u) // 1 MiB
+
+/* Linker symbols (kernel/linker.ld) */
+extern char sbss[], ebss[];
 
 typedef struct heap_block {
   uint32_t size;           // bytes in payload
@@ -21,7 +29,10 @@ static uint32_t align_up_u32(uint32_t x, uint32_t a) {
 
 void heap_init(void) {
   outb(0x3F8, 'H'); // Debug: heap_init called
-  heap_block_t *new_head = (heap_block_t *)((uint32_t)HEAP_START);
+  uint32_t start = align_up_u32((uint32_t)ebss, 4096u);
+  if (start < HEAP_FLOOR)
+    start = HEAP_FLOOR;
+  heap_block_t *new_head = (heap_block_t *)start;
   new_head->size = (uint32_t)(HEAP_SIZE - sizeof(heap_block_t));
   new_head->is_free = 1;
   new_head->next = (heap_block_t *)0;

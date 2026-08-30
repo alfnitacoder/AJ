@@ -13,6 +13,11 @@ extern void log_write_hex32(uint32_t v);
 extern void log_write_hex8(uint8_t v);
 
 #define TCP_MAX_PCBS 16
+/* Maximum segment payload: Ethernet MTU (1500) minus IPv4 (20) and TCP (20)
+ * headers. The e1000 TX path drops anything larger, so tcp_send MUST split
+ * application writes into MSS-sized segments. */
+#define TCP_MSS 1460
+
 // Forward declaration for HTTP callback
 static void tcp_check_http_data(struct tcp_pcb *pcb, uint8_t *data, int len);
 static struct tcp_pcb tcp_pcbs[TCP_MAX_PCBS];
@@ -166,6 +171,15 @@ static int tcp_output_segment_at(struct tcp_pcb *pcb, uint16_t flags,
                         can);
       }
       // #endregion
+      log_writestring("DBG: wnd_block len=");
+      log_write_u32(data_len);
+      log_writestring(" can=");
+      log_write_u32(can);
+      log_writestring(" flight=");
+      log_write_u32(pcb->snd_nxt - pcb->snd_una);
+      log_writestring(" peer_wnd=");
+      log_write_u32((uint32_t)pcb->peer_wnd);
+      log_putchar('\n');
       return -1;
     }
   }
@@ -360,11 +374,20 @@ int tcp_send(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
     return -1;
   if (len == 0)
     return 0;
-  // Send one PSH|ACK segment (no segmentation yet)
-  uint32_t seq = pcb->snd_nxt;
-  if (tcp_output_segment_at(pcb, TCP_PSH | TCP_ACK, seq, data, len, 1) != 0)
-    return -1;
-  tcp_track_tx(pcb, TCP_PSH | TCP_ACK, seq, data, len);
+  /* Segment to MSS: ip4_output/e1000 drop any frame whose payload exceeds
+   * the Ethernet MTU. Before this, a single write larger than ~1460 bytes
+   * (an SFTP directory reply, an HTTP page, ...) was silently discarded and
+   * the protocol above stalled forever. Stops at the first segment the peer
+   * window cannot take; tcp_tick retransmits the last tracked segment. */
+  while (len > 0) {
+    uint16_t n = (len > TCP_MSS) ? TCP_MSS : len;
+    uint32_t seq = pcb->snd_nxt;
+    if (tcp_output_segment_at(pcb, TCP_PSH | TCP_ACK, seq, data, n, 1) != 0)
+      return -1;
+    tcp_track_tx(pcb, TCP_PSH | TCP_ACK, seq, data, n);
+    data += n;
+    len -= n;
+  }
   return 0;
 }
 
@@ -743,6 +766,13 @@ static void tcp_input_body(struct pbuf *p, ip_addr_t src, ip_addr_t dst) {
 #endif
         extern void ssh_handle_connection_close(struct tcp_pcb *pcb);
         ssh_handle_connection_close(pcb);
+      } else {
+        /* Non-SSH servers (httpd): the client has closed - close our side
+         * NOW so the pcb slot frees. Without this, browser pre-connect
+         * sockets leak in CLOSE_WAIT and exhaust the 16-pcb pool: every ~8
+         * connections the next SYN is dropped and clients stall for the
+         * full TCP retransmit window (~31s) before recovering. */
+        tcp_close(pcb);
       }
       // We don't send our FIN yet. We wait for the application to call
       // tcp_close().
@@ -819,6 +849,13 @@ int tcp_send_data(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
   uint32_t seq = pcb->snd_nxt;
   if (tcp_output_segment_at(pcb, TCP_PSH | TCP_ACK, seq, data, len, 1) != 0) {
     /* TX ring full / ARP miss: keep snd_nxt; tcp_tick will rtx same seq. */
+    log_writestring("DBG: tcp_send_data FAIL len=");
+    log_write_u32(len);
+    log_writestring(" flight=");
+    log_write_u32(pcb->snd_nxt - pcb->snd_una);
+    log_writestring(" peer_wnd=");
+    log_write_u32(pcb->peer_wnd);
+    log_putchar('\n');
     tcp_track_tx(pcb, TCP_PSH | TCP_ACK, seq, data, len);
     return -1;
   }

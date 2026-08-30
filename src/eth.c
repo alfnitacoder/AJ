@@ -11,7 +11,8 @@ extern void log_write_hex8(uint8_t v);
 extern void log_write_u32(uint32_t v);
 extern void log_putchar(char c);
 extern int e1000_tx_send_raw(void *data, uint16_t len);
-extern uint8_t e1000_mac[6];
+extern uint8_t e1000_mac[2][6];
+extern int e1000_default_device;
 
 static uint32_t eth_rx_count = 0;
 static uint32_t eth_tx_count = 0;
@@ -82,7 +83,10 @@ int ethernet_output(struct pbuf *p, eth_addr_t *dst, uint16_t type) {
   struct eth_hdr *hdr = (struct eth_hdr *)p->payload;
   for (int i = 0; i < 6; i++) {
     hdr->dst.addr[i] = dst->addr[i];
-    hdr->src.addr[i] = e1000_mac[i];
+    int txd = (e1000_default_device >= 0 && e1000_default_device < 2)
+                  ? e1000_default_device
+                  : 0;
+    hdr->src.addr[i] = e1000_mac[txd][i];
   }
   hdr->type = htons(type);
   p->len += sizeof(struct eth_hdr);

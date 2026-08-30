@@ -102,6 +102,9 @@ VFS_OBJ = $(BUILD_DIR)/vfs.o
 AJLANG_OBJ = $(BUILD_DIR)/ajlang.o
 LLM_OBJ = $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
 DEMO_BIN = $(BUILD_DIR)/demo.bin
+FORKDEMO_BIN = $(BUILD_DIR)/FORKDEMO.BIN
+CHILD_BIN = $(BUILD_DIR)/CHILD.BIN
+USER_PROGS = $(FORKDEMO_BIN) $(CHILD_BIN)
 KERNEL_ELF = $(BUILD_DIR)/kernel.elf
 KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 
@@ -149,6 +152,12 @@ $(USER_MODE_OBJ): $(USER_MODE_SRC)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(DEMO_BIN): $(DEMO_SRC)
+	$(AS) -f bin $< -o $@
+
+$(FORKDEMO_BIN): asm/forkdemo.asm asm/ajos_syscall.inc
+	$(AS) -f bin $< -o $@
+
+$(CHILD_BIN): asm/child.asm asm/ajos_syscall.inc
 	$(AS) -f bin $< -o $@
 
 $(BUILD_DIR)/kernel.o: $(KERNEL_SRC)
@@ -336,16 +345,22 @@ data/TOK32K.BIN:
 	curl -L https://huggingface.co/karpathy/tinyllamas/resolve/main/tokenizer.bin -o data/TOK32K.BIN
 
 # Boot floppy: no LLM models (fast build). Optional: data/STORIES*.BIN targets below for manual use.
-$(OS_IMG): $(BOOT_OBJ) $(KERNEL_BIN) tools/mkfat12.py
+$(OS_IMG): $(BOOT_OBJ) $(KERNEL_BIN) $(USER_PROGS) tools/mkfat12.py
 	@mkdir -p data
 	@if [ -f examples/hello.aj ]; then cp examples/hello.aj data/; fi
 	@if [ ! -f data/hello.aj ]; then echo 'print "test"' > data/hello.aj; fi
 	@if [ -f examples/dnscheck.aj ]; then cp examples/dnscheck.aj data/; fi
+	@if [ -f examples/str_demo.aj ]; then cp examples/str_demo.aj data/; fi
+	cp $(USER_PROGS) data/
 	python3 tools/mkfat12.py $@ --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN)
 
 # Secondary IDE disk: small empty FAT (no 256MB model copy). Built from empty dir so data/ is not scanned.
-$(DATA_IMG): tools/mkfat12.py
+$(DATA_IMG): tools/mkfat12.py $(wildcard opt/*.aj) $(wildcard webapp/*.aj) $(wildcard www/*.html)
 	@mkdir -p $(BUILD_DIR)/data_img_staging
+	@rm -rf $(BUILD_DIR)/data_img_staging/opt $(BUILD_DIR)/data_img_staging/webapp $(BUILD_DIR)/data_img_staging/www
+	@cp -R opt $(BUILD_DIR)/data_img_staging/opt
+	@cp -R webapp $(BUILD_DIR)/data_img_staging/webapp
+	@cp -R www $(BUILD_DIR)/data_img_staging/www
 	cd $(BUILD_DIR)/data_img_staging && python3 ../../tools/mkfat12.py ../data.img --size-mb 32
 
 $(ISO_IMG): $(OS_IMG)
@@ -370,6 +385,11 @@ iso:
 	$(MAKE) force-clean-standard
 	$(MAKE) $(ISO_IMG)
 
+# Server image with static network config baked in (etc/NETWORK.CFG)
+server-img: $(BOOT_OBJ) $(KERNEL_BIN)
+	python3 tools/mkfat12.py $(BUILD_DIR)/ajos-server.img --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN) --netcfg etc/NETWORK.CFG --netcfg-dir etc
+	@echo "Server image: $(BUILD_DIR)/ajos-server.img (network flip configs baked in)"
+
 # Same image as iso; reminds output path for Proxmox upload (see docs/PROXMOX.md)
 proxmox-iso: iso
 	@echo "Proxmox: upload this file as a CD/ISO: $(ISO_IMG)"
@@ -380,7 +400,7 @@ iso-verify: $(ISO_IMG)
 	xorriso -indev $(ISO_IMG) -report_el_torito plain 2>&1 | head -25
 
 clean:
-	rm -f $(BOOT_OBJ) $(BOOT_CD_OBJ) $(BUILD_DIR)/ajos_cd.img $(KERNEL_ENTRY_OBJ) $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DEMO_BIN) $(KERNEL_ELF) $(KERNEL_BIN) $(OS_IMG) $(RUN_OS_IMG) $(DATA_IMG) $(ISO_IMG)
+	rm -f $(BOOT_OBJ) $(BOOT_CD_OBJ) $(BUILD_DIR)/ajos_cd.img $(KERNEL_ENTRY_OBJ) $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DEMO_BIN) $(USER_PROGS) $(KERNEL_ELF) $(KERNEL_BIN) $(OS_IMG) $(RUN_OS_IMG) $(DATA_IMG) $(ISO_IMG)
 
 
 # GUI QEMU: needs >=512M RAM — kernel PMM maps up to ~480M from 8M; default
@@ -576,6 +596,17 @@ test-sshfs:
 	chmod +x tools/ajos-cursor-remote/test-sshfs.sh
 	./tools/ajos-cursor-remote/test-sshfs.sh
 
+# End-to-end fork/execve/waitpid test: builds the serial image, boots QEMU,
+# logs in over serial, runs FORKDEMO.BIN via run3 (foreground + background).
+test-fork: force-clean-serial
+	-pkill -9 qemu-system-i386 2>/dev/null || true
+	@sleep 1
+	rm -f $(OS_IMG) $(RUN_OS_IMG)
+	@mkdir -p build
+	$(MAKE) CFLAGS="$(CFLAGS) -DAJOS_SERIAL_ONLY" $(OS_IMG) $(DATA_IMG)
+	cp $(OS_IMG) $(RUN_OS_IMG)
+	python3 tools/test_fork.py
+
 # QEMU user-net: ping 10.0.2.2 should work; ping to public IPs often times out (ICMP not forwarded).
 test-net: force-clean-serial
 	-pkill -9 qemu-system-i386 2>/dev/null || true
@@ -587,4 +618,4 @@ test-net: force-clean-serial
 	@echo "--- Running network autotest in QEMU (see kernel AJOS_NET_AUTOTEST) ---"
 	python3 tools/net_autotest.py
 
-.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net test-sshfs cursor-remote cursor-remote-stop force-clean-serial force-clean-standard
+.PHONY: all clean run run-console run-console-img run-console-qemu run-console-file run-console-qemu-alt run-console-qemu-gui run-console-qemu-minimal install-qemu-mac iso proxmox-iso iso-verify run-iso run-iso-vga run-iso-vga-tty run-iso-curses run-iso-vnc run-console-test-crypto-fail test-kdf test-net test-fork test-sshfs cursor-remote cursor-remote-stop force-clean-serial force-clean-standard

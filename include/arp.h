@@ -31,6 +31,8 @@ void arp_init(void);
 void arp_input(struct pbuf *p);
 int arp_query(uint32_t ip);
 uint32_t arp_get_ajos_ip(void);
+uint32_t arp_get_if_ip(int iface);
+void arp_set_if_ip(int iface, uint32_t ip);
 void arp_set_ajos_ip(uint32_t ip);
 int arp_get_mac_for_ip(uint32_t ip, eth_addr_t *out_mac);
 uint32_t arp_get_ip_at(int idx);

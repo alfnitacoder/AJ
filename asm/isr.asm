@@ -13,6 +13,11 @@ idt_load:
 [extern user_mode_kernel_esp]
 [extern user_mode_kernel_eip]
 
+; Resume path for freshly built user task stacks: enters with ESP pointing at
+; the four segment dwords (gs,fs,es,ds), then the pusha block, then
+; int_no/err_code, then the iret frame. Same layout the stub pops below.
+[global isr_user_exit]
+
 isr_common_stub:
     pusha
     ; Push segment selectors as 32-bit values so the C regs struct matches.
@@ -49,6 +54,7 @@ isr_common_stub:
     jmp dword [user_mode_kernel_eip]
 .no_user_exit:
 
+isr_user_exit:
     pop eax
     mov gs, ax
     pop eax

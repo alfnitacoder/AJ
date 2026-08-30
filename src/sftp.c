@@ -75,8 +75,12 @@ extern void log_putchar(char c);
 #define SFTP_MAX_SESSIONS 4
 #define SFTP_MAX_HANDLES 12
 #define SFTP_MAX_PATH 256
-/* sshfs default max_write is 32KB; SSH packet cap is 35000. */
-#define SFTP_RX_MAX 34000u
+/* Must hold one full SFTP message: OpenSSH pipelines WRITE requests with
+ * 32768-byte data chunks -> ~32.9 KB per message (length prefix + WRITE hdr
+ * + payload). At 32768 the message did not fit and sftp_feed's overflow
+ * handler dropped the ENTIRE ring contents, so big uploads hung forever.
+ * 64KB also covers sshfs (default max_write 32KB, SSH packet cap 35000). */
+#define SFTP_RX_MAX 65536u
 #define SFTP_MAX_FILE 262144u
 #define SFTP_DIR_MAX 64
 #define SFTP_NAME_MAX 80
@@ -1568,7 +1572,13 @@ static void sftp_send_readdir(struct ssh_connection *conn, uint32_t id,
   }
   sftp_wr_u32(buf + count_off, sent);
   h->dir_index += sent;
+  log_writestring("DBG: readdir reply built sent=");
+  log_write_u32(sent);
+  log_writestring(" o=");
+  log_write_u32(o);
+  log_putchar('\n');
   sftp_reply(conn, buf, o);
+  log_writestring("DBG: readdir sftp_reply returned\n");
 }
 
 static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
@@ -1577,6 +1587,11 @@ static void sftp_on_packet(struct sftp_sess *s, const uint8_t *p, int len)
   if (len < 1)
     return;
   uint8_t type = p[0];
+  log_writestring("DBG: sftp pkt type=");
+  log_write_u32(type);
+  log_writestring(" len=");
+  log_write_u32((uint32_t)len);
+  log_putchar('\n');
   if (type == SSH_FXP_INIT)
   {
     uint8_t buf[160];

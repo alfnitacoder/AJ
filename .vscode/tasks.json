@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AJOS: Push active file to /tmp",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/ajos_dev.sh push '${file}' '/tmp/${fileBasename}'",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "AJOS: Push active file to /tmp/www",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/ajos_dev.sh push '${file}' '/tmp/www/${fileBasename}'",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "AJOS: Pull active file from /tmp",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/ajos_dev.sh pull '/tmp/${fileBasename}' '${file}'",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "AJOS: Sync www/ to /tmp/www",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/ajos_dev.sh sync '${workspaceFolder}/www' '/tmp/www'",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "AJOS: Open preview URL",
+      "type": "shell",
+      "command": "open http://127.0.0.1:9080/",
+      "problemMatcher": []
+    },
+    {
+      "label": "AJOS: Run command on guest...",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/ajos_dev.sh run '${input:guestCmd}'",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "guestCmd",
+      "type": "promptString",
+      "description": "Command to run on the AJOS guest (e.g. ls /tmp)"
+    }
+  ]
+}

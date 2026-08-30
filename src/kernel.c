@@ -20,6 +20,7 @@
 #include "user.h"
 #include "vfs.h"
 #include "video.h"
+#include "vmm.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -146,11 +147,22 @@ static void cmd_hostname(const char *args)
 }
 
 // Paging moved to kernel/mm/paging.c
-// Keep is_user_addr for sys_write validation
+// Ring-3 user program window: virtual range every user process is loaded into
+// and the only range user pointers may reference (must match cmd_run3 load/
+// stack addresses and the per-process window page tables in paging.c).
+#define USER_WIN_BASE 0x00300000u
+#define USER_WIN_PAGES 64u
+#define USER_WIN_SIZE (USER_WIN_PAGES * 4096u)
+#define USER_STACK_TOP 0x00330000u
+// Image must leave the stack area below USER_STACK_TOP unmolested.
+#define USER_IMAGE_MAX 0x0002F000u
+// Segment selectors (must match gdt.asm / user_mode.asm)
+#define USER_CS_SEL 0x1Bu
+#define USER_DS_SEL 0x23u
+
 static int is_user_addr(uint32_t addr)
 {
-  // run3 program + stack region (must match cmd_run3 load/stack)
-  return (addr >= 0x00300000u && addr < 0x00340000u);
+  return (addr >= USER_WIN_BASE && addr < USER_WIN_BASE + USER_WIN_SIZE);
 }
 
 #define DISK_CACHE_BASE ((uint8_t *)0x51000u)
@@ -350,14 +362,37 @@ void register_interrupt_handler(uint8_t n, isr_t handler)
   interrupt_handlers[n] = handler;
 }
 
+// Timer globals (needed early: sleep_ms waits on pit_ticks)
+#define PIT_HZ 100u
+volatile uint32_t pit_ticks = 0;
+
 void sleep_ms(uint32_t ms)
 {
-  // Simple busy-wait sleep (can be improved with PIT)
-  // For now, just a placeholder
-  volatile uint32_t count = ms * 1000;
-  while (count-- > 0)
+  /* Tick-based wait instead of a pause loop: keeps the CPU available to
+   * interrupts (timer/TCP ticks) while sleeping. */
+  uint32_t ticks = (ms * PIT_HZ + 999u) / 1000u;
+  if (ticks == 0)
+    ticks = 1;
+  uint32_t flags;
+  __asm__ volatile("pushfl\n popl %0" : "=r"(flags) :: "memory");
+  uint32_t start = pit_ticks;
+  if (flags & 0x200u) /* IF set: hlt until the next interrupt */
   {
-    __asm__ volatile("pause");
+    while ((uint32_t)(pit_ticks - start) < ticks)
+      __asm__ volatile("hlt");
+  }
+  else
+  {
+    /* Interrupts disabled: we are inside an ISR (e.g. a shell command
+     * dispatched from the timer/NAPI context of an SSH session). pit_ticks
+     * is frozen and hlt would never wake, so wait a bounded number of pause
+     * rounds (~ms, rough under emulation) instead of freezing the kernel. */
+    uint32_t rounds = ms * 8u + 8u;
+    while (rounds--)
+    {
+      for (volatile int i = 0; i < 1000; i++)
+        __asm__ volatile("pause");
+    }
   }
 }
 
@@ -541,9 +576,7 @@ static int syslog_line_tagged = 0;
  * logs arriving after the shell prompt (prompts end in "> "). */
 static char syslog_line_tail[8];
 
-// Timer globals
-#define PIT_HZ 100u
-volatile uint32_t pit_ticks = 0;
+// Timer globals (pit_ticks/PIT_HZ defined near sleep_ms, which needs them)
 
 // System call numbers
 #define SYSCALL_WRITE 1
@@ -561,6 +594,19 @@ volatile uint32_t pit_ticks = 0;
 #define SYSCALL_SEND 13
 #define SYSCALL_RECV 14
 #define SYSCALL_CLOSE 15
+#define SYSCALL_FORK 16     /* () -> child pid (0 in child) */
+#define SYSCALL_EXECVE 17   /* (path, argv, envp) -> replaces image */
+#define SYSCALL_WAITPID 18  /* (pid, &status, options) -> reaped pid */
+
+/* AJOS user program image header (flat binary; see asm/demo_prog.asm). */
+struct __attribute__((packed)) ajos_bin_hdr
+{
+  char magic[7]; // "AJOSBIN"
+  uint8_t version;
+  uint32_t entry_off;
+  uint32_t data_off;
+  uint32_t data_len;
+};
 
 // User mode globals
 volatile int user_mode_exit_flag = 0;
@@ -570,7 +616,6 @@ volatile uint32_t user_mode_kernel_eip = 0;
 
 // External declarations (forward declarations for types defined later in this
 // file)
-static void scheduler_tick(void);
 
 // Forward declarations for types defined later in this file
 // These structs are defined later in the file but used in syscall_handler
@@ -595,7 +640,21 @@ struct process
   int is_background;
   uint32_t esp;          // Current stack pointer
   uint32_t kernel_stack; // Base of kernel stack
+  /* Real fork/execve support */
+  uint32_t frames[USER_WIN_PAGES]; // Phys frames backing the user window
+  uint32_t pd;                      // Private page directory (0 = kernel pd)
+  uint32_t kernel_stack_size;       // Bytes in kernel_stack allocation
+  uint32_t exit_code;               // Valid when state == ZOMBIE
+  uint32_t wake_tick;               // PIT tick to wake a SLEEPING process
+  int is_user_prog;                 // Ring-3 process under the scheduler
 };
+
+/* Process table state lives here (before timer_handler, which preempts on
+ * the ring-3 boundary and needs it). */
+static struct process process_table[MAX_PROCESSES];
+static uint32_t next_pid = 1;
+static struct process *current_process = 0;
+static uint32_t scheduler_ticks = 0;
 
 // Extern for assembly context switch
 extern void switch_to(uint32_t *old_esp, uint32_t new_esp);
@@ -619,6 +678,19 @@ static uint32_t next_socket_fd = SOCKET_FD_BASE;
 static struct process *process_get(uint32_t pid);
 static uint32_t process_alloc(const char *name);
 static void process_free(uint32_t pid);
+static void schedule(void);
+static uint32_t user_spawn(const char *name, const uint8_t *img, uint32_t size,
+                           char *const argv[], int bg);
+static void user_process_exit(uint32_t exit_code);
+static void user_free_memory(struct process *p);
+static uint32_t sys_fork(struct regs *r);
+static uint32_t sys_execve(struct regs *r, uint32_t path_u, uint32_t argv_u,
+                           uint32_t envp_u);
+extern int fat12_read_file_to_ram(const char *path, uint8_t **out_buf,
+                                  uint32_t *out_size);
+extern void *kmalloc(uint32_t size);
+extern void kfree(void *ptr);
+static uint32_t sys_waitpid(uint32_t pid, uint32_t status_u);
 
 int socket_alloc_fd(struct tcp_pcb *pcb, uint32_t pid)
 {
@@ -1279,8 +1351,15 @@ static void timer_handler(struct regs *r)
   (void)r;
   pit_ticks++;
 
-  /* Must run always: SSH/HTTP retransmits and in-flight TCP state depend on it.
-   * Placed before the early return that skips scheduler/RX polling during boot. */
+  /* EOI the timer NOW, before any processing: if we preempt below, the PIC
+   * would otherwise keep IRQ0 (and everything below it, incl. the keyboard)
+   * masked until the preempted task resumes — a user program that never
+   * syscalls could stall all interrupt delivery. isr_handler skips the EOI
+   * for vector 32. With IF=0 throughout this handler there is no nesting. */
+  outb(0x20, 0x20);
+
+  /* Must run always: SSH/HTTP retransmits and in-flight TCP state depend on
+   * it. */
   extern void tcp_tick(uint32_t now_ticks);
   tcp_tick(pit_ticks);
 
@@ -1304,30 +1383,32 @@ static void timer_handler(struct regs *r)
     }
   }
 
-  /* Skip heavy calls until we reach login prompt */
-  return;
-
-  // Scheduler tick (Roadmap v1.0.1 - Process Management)
-  scheduler_tick();
-
-  // (tcp_tick moved above early return)
-
-  // Fallback RX polling: if E1000 RX interrupts are occasionally missed in
-  // emulation, TCP/DNS can stall. Poll a few packets per tick to keep the
-  // stack moving even without NIC IRQs.
-  // Only poll every 10 ticks (100ms at 100Hz) to reduce CPU usage
-  static uint32_t poll_counter = 0;
-  poll_counter++;
-  // If the NIC IRQ handler scheduled NAPI-style polling, drain RX promptly.
-  if (netdev_napi_any_scheduled())
+  /* Wake user processes whose sleep expired. */
+  for (int i = 0; i < MAX_PROCESSES; i++)
   {
-    netdev_napi_poll(32);
+    struct process *p = &process_table[i];
+    if (p->in_use && p->state == PROC_STATE_SLEEPING &&
+        (int32_t)(pit_ticks - p->wake_tick) >= 0)
+    {
+      p->state = PROC_STATE_RUNNING;
+    }
   }
-  else if (poll_counter >= 10)
+
+  /* Preempt only when the interrupted context was ring 3: switching inside
+   * kernel code would cut through non-reentrant paths (kmalloc free lists,
+   * TCP state machines, FAT caches). Kernel code yields voluntarily at its
+   * blocking loops instead. */
+  if (r && (r->cs & 3u) == 3u)
   {
-    poll_counter = 0;
-    // Best-effort safety net even without IRQs: drain a small burst.
-    netdev_napi_poll(4);
+    if (current_process)
+    {
+      current_process->cpu_ticks++;
+    }
+    scheduler_ticks++;
+    if (scheduler_ticks % 10 == 0)
+    {
+      schedule();
+    }
   }
 }
 
@@ -1374,6 +1455,23 @@ uint32_t sys_write(uint32_t ptr, uint32_t len, int from_user)
 
 uint32_t sys_sleep(uint32_t ms)
 {
+  /* Ring-3 programs sleep through the scheduler: mark SLEEPING, switch away,
+   * and let the timer wake us. Kernel callers use the hlt-based sleep_ms. */
+  struct process *p = current_process;
+  if (p && p->is_user_prog && p->in_use)
+  {
+    uint32_t ticks = (ms * PIT_HZ + 999u) / 1000u;
+    if (ticks == 0)
+      ticks = 1;
+    p->state = PROC_STATE_SLEEPING;
+    p->wake_tick = pit_ticks + ticks;
+    while (p->state == PROC_STATE_SLEEPING)
+    {
+      schedule();
+      __asm__ volatile("hlt");
+    }
+    return 0;
+  }
   sleep_ms(ms);
   return 0;
 }
@@ -1382,6 +1480,7 @@ uint32_t sys_getkey(void) { return (uint32_t)input_getkey(); }
 
 static void syscall_handler(struct regs *r)
 {
+#ifdef AJOS_SYSCALL_DEBUG
   // #region agent log - raw serial at very start
   {
     uint32_t esp_val;
@@ -1408,8 +1507,10 @@ static void syscall_handler(struct regs *r)
     outb(0x3F8, (uint8_t)'\n');
   }
   // #endregion
-  // Validate r pointer before accessing it
-  if ((uint32_t)r < 0x1000 || (uint32_t)r > 0x1000000)
+#endif
+  // Validate r pointer before accessing it. Kernel stacks are kmalloc'd from
+  // the PMM (8MB..480MB, identity-mapped) — bound to the PMM end, not 16MB.
+  if ((uint32_t)r < 0x1000u || (uint32_t)r >= 0x1E000000u)
   {
     const char *m = "[DBG] syscall_handler: invalid r pointer\n";
     for (const char *p = m; *p; p++)
@@ -1433,9 +1534,14 @@ static void syscall_handler(struct regs *r)
     ret = sys_getkey();
     break;
   case SYSCALL_EXIT:
-    // Request exit from user-mode program back to the kernel.
-    // Keep it simple: set a flag that the ISR stub uses to jump back
-    // to the saved kernel context (enter_user_mode).
+    /* Real process exit for scheduled ring-3 programs: become a zombie and
+     * switch away forever; the parent reaps us via waitpid. ebx = exit code. */
+    if (from_user && current_process && current_process->is_user_prog)
+    {
+      user_process_exit(r->ebx); /* never returns */
+    }
+    // Legacy synchronous path (enter_user_mode): set a flag that the ISR stub
+    // uses to jump back to the saved kernel context.
     __asm__ volatile("cli");
     user_mode_exit_flag = 1;
     ret = 0;
@@ -1786,20 +1892,35 @@ static void syscall_handler(struct regs *r)
       ret = 0xFFFFFFFFu; // -1
     }
     break;
+  case SYSCALL_FORK:
+    // fork(): duplicate this process's window; child resumes with eax=0.
+    ret = from_user ? sys_fork(r) : 0xFFFFFFFFu;
+    break;
+  case SYSCALL_EXECVE:
+    // execve(path, argv, envp): replace this process's image (envp ignored).
+    ret = from_user ? sys_execve(r, r->ebx, r->ecx, r->edx) : 0xFFFFFFFFu;
+    break;
+  case SYSCALL_WAITPID:
+    // waitpid(pid, &status, options): reap a child; pid 0 = any child.
+    ret = from_user ? sys_waitpid(r->ebx, r->ecx) : 0xFFFFFFFFu;
+    break;
   default:
     ret = 0xFFFFFFFFu;
     break;
   }
+#ifdef AJOS_SYSCALL_DEBUG
   // #region agent log
   log_writestring("[DBG] pre-ret r=0x");
   log_write_hex32((uint32_t)r);
   log_putchar('\n');
   // #endregion
+#endif
   r->eax = ret;
 }
 
 void isr_handler(struct regs *r)
 {
+#ifdef AJOS_SYSCALL_DEBUG
   // #region agent log - log ESP and TSS.esp0 at ISR entry
   if (r->int_no == 128)
   { // Only for syscalls
@@ -1835,6 +1956,7 @@ void isr_handler(struct regs *r)
     outb(0x3F8, (uint8_t)'\n');
   }
   // #endregion
+#endif
   static const char *exception_messages[32] = {
       "Division By Zero",
       "Debug",
@@ -1914,8 +2036,9 @@ void isr_handler(struct regs *r)
     }
   }
 
-  // Send EOI for IRQs (32..47)
-  if (r->int_no >= 32 && r->int_no <= 47)
+  // Send EOI for IRQs (32..47). The timer (32) sends its own EOI at the top
+  // of timer_handler so a mid-handler preemption cannot mask the PIC.
+  if (r->int_no >= 33 && r->int_no <= 47)
   {
     if (r->int_no >= 40)
     {
@@ -2618,6 +2741,9 @@ int input_getkey(void)
     // If no input from either source, halt until next interrupt
     if (!kbd_has_data() && !serial_received())
     {
+      /* Give scheduled user processes a chance to run while the console
+       * waits for input (the kernel itself never gets preempted). */
+      schedule();
       __asm__ volatile("hlt");
       continue;
     }
@@ -2707,6 +2833,12 @@ int input_getkey(void)
     {
       goto handle_keyboard;
     }
+    /* Nothing pending on any input source (SSH stdin, serial, PS/2 queue):
+     * halt until the next interrupt (keyboard IRQ1, serial IRQ4, timer IRQ0,
+     * NIC IRQ11). Without this the console loop spins the vCPU at 100% while
+     * the machine sits idle. */
+    __asm__ volatile("sti");
+    __asm__ volatile("hlt");
     continue;
 #endif
 
@@ -2956,12 +3088,8 @@ static void *alloc_slots[ALLOC_SLOTS];
 // ---------------------------
 // Process Management (Roadmap v1.0.1 - Phase 1)
 // ---------------------------
-// (struct process and enums defined earlier for syscall handler)
-
-static struct process process_table[MAX_PROCESSES];
-static uint32_t next_pid = 1;               // Start PIDs at 1 (0 = kernel)
-static struct process *current_process = 0; // Currently running process
-static uint32_t scheduler_ticks = 0;        // Counter for scheduler decisions
+// (struct process, enums, process_table, current_process: defined earlier,
+//  before timer_handler, which preempts at the ring-3 boundary)
 
 // Forward declaration
 static struct process *scheduler_next(void);
@@ -3059,6 +3187,7 @@ static uint32_t kthread_create(const char *name, void (*fn)(void *),
     return 0;
   }
   p->kernel_stack = (uint32_t)stack_base;
+  p->kernel_stack_size = 4096;
 
   uint32_t *stack = (uint32_t *)(p->kernel_stack + 4096);
 
@@ -3088,14 +3217,27 @@ static uint32_t process_alloc(const char *name)
     if (!process_table[i].in_use)
     {
       process_table[i].pid = next_pid++;
-      process_table[i].ppid = current_user_pid; // Set parent to current user
-                                                // process (or 0 if kernel)
+      // Parent: the running user process if any, else the kernel task that
+      // is dispatching (the shell, PID 1, for shell-issued commands).
+      process_table[i].ppid = current_user_pid
+                                  ? current_user_pid
+                                  : (current_process ? current_process->pid
+                                                     : 0);
       process_table[i].state = PROC_STATE_RUNNING;
       process_table[i].in_use = 1;
       process_table[i].start_ticks = pit_ticks;
       process_table[i].cpu_ticks = 0;
       process_table[i].page_dir = 0;
       process_table[i].is_background = 0;
+      process_table[i].esp = 0;
+      process_table[i].kernel_stack = 0;
+      process_table[i].kernel_stack_size = 0;
+      process_table[i].pd = 0;
+      process_table[i].exit_code = 0;
+      process_table[i].wake_tick = 0;
+      process_table[i].is_user_prog = 0;
+      for (int f = 0; f < (int)USER_WIN_PAGES; f++)
+        process_table[i].frames[f] = 0;
 
       // Copy name
       int j = 0;
@@ -3133,16 +3275,53 @@ static void cmd_thread_test(const char *arg)
   kthread_create("test_th", test_thread, (void *)123);
 }
 
-// Free a process slot
+// Free a process slot and all of its resources (window frames, private page
+// directory, kernel stack, sockets). The caller must guarantee the process is
+// never scheduled again (state ZOMBIE/DEAD, or a synchronous legacy caller).
 static void process_free(uint32_t pid)
 {
   for (int i = 0; i < MAX_PROCESSES; i++)
   {
     if (process_table[i].pid == pid && process_table[i].in_use)
     {
-      process_table[i].in_use = 0;
-      process_table[i].state = PROC_STATE_DEAD;
-      process_table[i].name[0] = '\0';
+      struct process *p = &process_table[i];
+      struct process *prev_current = current_process;
+
+      /* Close any sockets this process still owns. */
+      for (int s = 0; s < MAX_SOCKETS; s++)
+      {
+        if (socket_table[s].in_use && socket_table[s].pid == p->pid)
+        {
+          if (socket_table[s].pcb)
+          {
+            extern int tcp_close(struct tcp_pcb *pcb);
+            tcp_close(socket_table[s].pcb);
+          }
+          socket_table[s].in_use = 0;
+        }
+      }
+
+      /* Detach from the scheduler first so an interrupt cannot resurrect us
+       * mid-teardown. */
+      current_process = (p == prev_current) ? &process_table[0] : prev_current;
+      p->state = PROC_STATE_DEAD;
+      p->in_use = 0;
+
+      user_free_memory(p);
+
+      /* Never free the kernel stack we might be executing on right now
+       * (legacy synchronous callers run on the boot stack, which is not a
+       * heap allocation; scheduled zombies are never current here). */
+      if (p->kernel_stack && p != prev_current)
+      {
+        kfree((void *)p->kernel_stack);
+      }
+      p->kernel_stack = 0;
+      p->kernel_stack_size = 0;
+      p->esp = 0;
+      p->is_user_prog = 0;
+      p->exit_code = 0;
+      p->name[0] = '\0';
       return;
     }
   }
@@ -3199,7 +3378,24 @@ static struct process *scheduler_next(void)
   return 0;
 }
 
-// Update current process pointer (called from scheduler)
+// Disable interrupts, returning the previous EFLAGS (for restore on resume).
+// Every context switch runs between these two: int 0x80 is a trap gate, so
+// syscalls execute with IF=1 and a timer tick mid-switch would corrupt it.
+static inline uint32_t sched_int_lock(void)
+{
+  uint32_t f;
+  __asm__ volatile("pushfl\n popl %0\n cli" : "=r"(f) :: "memory");
+  return f;
+}
+
+static inline void sched_int_unlock(uint32_t f)
+{
+  if (f & 0x200u)
+    __asm__ volatile("sti" ::: "memory");
+}
+
+// Round-robin dispatch to the next runnable process. Safe from syscall
+// context (voluntary yield) and from the timer ISR at the ring-3 boundary.
 static void schedule(void)
 {
   if (!current_process)
@@ -3228,11 +3424,11 @@ static void schedule(void)
         process_table[idx].state == PROC_STATE_RUNNING &&
         process_table[idx].esp != 0)
     {
-      // Never switch to a process whose stack is outside identity-mapped RAM
-      // (0..64MB). Faults at CR2=0x220F0000 were caused by switching to
-      // a process with a bad esp (e.g. unmapped high address).
+      // Never switch to a process whose stack is outside identity-mapped RAM.
+      // PMM hands out pages from 8MB up to 480MB (PMM_END_ADDR in pmm.c), all
+      // identity-mapped; the old 64MB cap rejected valid high stacks.
       uint32_t esp = process_table[idx].esp;
-      if (esp >= 0x1000u && esp < 0x04000000u)
+      if (esp >= 0x1000u && esp < 0x1E000000u)
       {
         next = &process_table[idx];
         break;
@@ -3243,26 +3439,468 @@ static void schedule(void)
   if (next && next != current_process)
   {
     struct process *prev = current_process;
+    uint32_t flags = sched_int_lock();
+
     current_process = next;
+    current_user_pid = next->is_user_prog ? next->pid : 0;
+
+    /* Enter the target's address space and arm its ring-0 stack before the
+     * switch; whoever resumes us later does the same for us. */
+    vmm_load_pd(next->pd ? (uint32_t *)next->pd : vmm_get_kernel_pd());
+    if (next->kernel_stack)
+    {
+      extern void tss_set_esp0(uint32_t esp0);
+      tss_set_esp0(next->kernel_stack + next->kernel_stack_size);
+    }
+
     switch_to(&prev->esp, next->esp);
+
+    /* Resumed: our resumer restored cr3/TSS/current_process for us. */
+    sched_int_unlock(flags);
   }
 }
 
-static void scheduler_tick(void)
+// ---------------------------
+// Ring-3 process lifecycle: spawn / fork / execve / exit / waitpid
+// ---------------------------
+
+#define USER_KSTACK_SIZE 8192u
+extern void isr_user_exit(void);
+
+/* Write into a process's user window through the identity mapping of its
+ * frames. Frames come from the PMM (>=8MB) so their physical addresses are
+ * always identity-mapped and never alias the window's virtual range. */
+static int win_write(struct process *p, uint32_t vaddr, const void *buf,
+                     uint32_t len)
 {
-  scheduler_ticks++;
-
-  // Update current process CPU time
-  if (current_process)
+  if (vaddr < USER_WIN_BASE ||
+      vaddr + len > USER_WIN_BASE + USER_WIN_SIZE || len == 0)
+    return 0;
+  uint32_t off = vaddr - USER_WIN_BASE;
+  const uint8_t *src = (const uint8_t *)buf;
+  while (len)
   {
-    current_process->cpu_ticks++;
+    uint32_t page = off >> 12;
+    uint32_t po = off & 0xFFFu;
+    uint32_t n = 4096u - po;
+    if (n > len)
+      n = len;
+    if (!p->frames[page])
+      return 0;
+    mem_copy((void *)(p->frames[page] + po), src, n);
+    src += n;
+    off += n;
+    len -= n;
+  }
+  return 1;
+}
 
-    // Preemption: yield every 10 ticks (approx 100ms)
-    // Only preempt if we are not in an critical section (future)
-    if (scheduler_ticks % 10 == 0)
+/* Free a process's user window frames and private page directory. Safe from
+ * any context; switches back to the kernel pd if the caller was using it. */
+static void user_free_memory(struct process *p)
+{
+  if (p->pd)
+  {
+    if ((uint32_t *)p->pd == vmm_current_pd())
+      vmm_load_pd(vmm_get_kernel_pd());
+    vmm_destroy_user_pd((uint32_t *)p->pd);
+    p->pd = 0;
+  }
+  for (int i = 0; i < (int)USER_WIN_PAGES; i++)
+  {
+    if (p->frames[i])
     {
-      schedule();
+      pmm_free_page((void *)p->frames[i], 0);
+      p->frames[i] = 0;
     }
+  }
+}
+
+static int ajos_bin_valid(const uint8_t *img, uint32_t size)
+{
+  const struct ajos_bin_hdr *hdr = (const struct ajos_bin_hdr *)img;
+  static const char magic[7] = {'A', 'J', 'O', 'S', 'B', 'I', 'N'};
+  if (img == (void *)0 || size < sizeof(*hdr) || size > USER_IMAGE_MAX)
+    return 0;
+  for (int i = 0; i < 7; i++)
+    if (hdr->magic[i] != magic[i])
+      return 0;
+  return hdr->entry_off < size;
+}
+
+/* Zero the window, copy the image in, and build the initial user stack:
+ *   [argc][argv[0]]...[argv[argc-1]][NULL]   (strings live above the array)
+ * Returns the entry point and sets *out_esp to the new user stack pointer. */
+static uint32_t user_load_image(struct process *p, const uint8_t *img,
+                                uint32_t size, char *const argv[],
+                                uint32_t *out_esp)
+{
+  const struct ajos_bin_hdr *hdr = (const struct ajos_bin_hdr *)img;
+
+  for (int i = 0; i < (int)USER_WIN_PAGES; i++)
+  {
+    uint32_t *pg = (uint32_t *)p->frames[i];
+    for (int w = 0; w < 1024; w++)
+      pg[w] = 0;
+  }
+  for (uint32_t off = 0; off < size; off += 4096u)
+  {
+    uint32_t page = off >> 12;
+    uint32_t n = size - off;
+    if (n > 4096u)
+      n = 4096u;
+    mem_copy((void *)p->frames[page], img + off, n);
+  }
+
+  uint32_t sp = USER_STACK_TOP;
+  uint32_t argp[16];
+  int argc = 0;
+  for (int i = 0; i < 16 && argv && argv[i]; i++)
+  {
+    const char *s = argv[i];
+    uint32_t len = 0;
+    while (s[len] && len < 256)
+      len++;
+    sp -= (len + 1);
+    win_write(p, sp, s, len + 1);
+    argp[argc++] = sp;
+  }
+  sp &= ~3u;
+  uint32_t zero = 0;
+  sp -= 4;
+  win_write(p, sp, &zero, 4);
+  for (int i = argc - 1; i >= 0; i--)
+  {
+    sp -= 4;
+    win_write(p, sp, &argp[i], 4);
+  }
+  sp -= 4;
+  win_write(p, sp, &argc, 4);
+
+  *out_esp = sp;
+  return USER_WIN_BASE + hdr->entry_off;
+}
+
+/* Build a fresh kernel stack for a user task so that switch_to + the
+ * isr_user_exit pop sequence resume it at the given trap frame. */
+static uint32_t *kstack_push_user_frame(uint32_t *ks, const struct regs *fr,
+                                        uint32_t eax)
+{
+  /* iret frame */
+  *--ks = fr->ss;
+  *--ks = fr->useresp;
+  *--ks = fr->efl;
+  *--ks = fr->cs;
+  *--ks = fr->eip;
+  *--ks = fr->err_code; /* skipped by add esp,8 */
+  *--ks = fr->int_no;   /* skipped by add esp,8 */
+  /* pusha block (low -> high: edi,esi,ebp,esp,ebx,edx,ecx,eax) */
+  *--ks = eax;
+  *--ks = fr->ecx;
+  *--ks = fr->edx;
+  *--ks = fr->ebx;
+  *--ks = fr->esp; /* discarded by popa */
+  *--ks = fr->ebp;
+  *--ks = fr->esi;
+  *--ks = fr->edi;
+  /* segment dwords (low -> high: gs,fs,es,ds) */
+  *--ks = fr->ds;
+  *--ks = fr->es;
+  *--ks = fr->fs;
+  *--ks = fr->gs;
+  /* switch_to resume: pops edi,esi,ebx,ebp then rets to isr_user_exit */
+  *--ks = (uint32_t)isr_user_exit;
+  *--ks = 0; /* ebp */
+  *--ks = 0; /* ebx */
+  *--ks = 0; /* esi */
+  *--ks = 0; /* edi */
+  return ks;
+}
+
+/* Create a scheduled ring-3 process from an in-memory AJOSBIN image. The
+ * caller keeps ownership of img. Returns the pid, or 0 on failure. */
+static uint32_t user_spawn(const char *name, const uint8_t *img, uint32_t size,
+                           char *const argv[], int bg)
+{
+  if (!ajos_bin_valid(img, size))
+    return 0;
+
+  uint32_t pid = process_alloc(name);
+  if (pid == 0)
+    return 0;
+  struct process *p = process_get(pid);
+  if (!p)
+    return 0;
+
+  void *kstack = kmalloc(USER_KSTACK_SIZE);
+  if (!kstack)
+  {
+    process_free(pid);
+    return 0;
+  }
+  p->kernel_stack = (uint32_t)kstack;
+  p->kernel_stack_size = USER_KSTACK_SIZE;
+
+  if (pmm_get_free_pages() < (USER_WIN_PAGES + 8))
+    goto fail;
+  for (int i = 0; i < (int)USER_WIN_PAGES; i++)
+  {
+    p->frames[i] = (uint32_t)pmm_alloc_page(0);
+    if (!p->frames[i])
+      goto fail;
+  }
+  p->pd = (uint32_t)vmm_create_user_pd(p->frames, (int)USER_WIN_PAGES,
+                                       USER_WIN_BASE);
+  if (!p->pd)
+    goto fail;
+
+  uint32_t esp = 0;
+  uint32_t entry = user_load_image(p, img, size, argv, &esp);
+
+  struct regs fr;
+  {
+    uint32_t *w = (uint32_t *)&fr;
+    uint32_t *end = w + sizeof(fr) / sizeof(uint32_t);
+    while (w < end)
+      *w++ = 0;
+  }
+  fr.ss = USER_DS_SEL;
+  fr.useresp = esp;
+  fr.efl = 0x202u; /* IF */
+  fr.cs = USER_CS_SEL;
+  fr.eip = entry;
+  fr.ds = fr.es = fr.fs = fr.gs = USER_DS_SEL;
+  fr.int_no = 0x80;
+
+  uint32_t *ks = (uint32_t *)(p->kernel_stack + p->kernel_stack_size);
+  ks = kstack_push_user_frame(ks, &fr, 0);
+  p->esp = (uint32_t)ks;
+  p->is_user_prog = 1;
+  p->is_background = bg;
+  p->state = PROC_STATE_RUNNING;
+  return pid;
+
+fail:
+  process_free(pid);
+  return 0;
+}
+
+/* Terminate the calling ring-3 process: release its memory, become a zombie,
+ * and switch away forever. The parent frees the kernel stack at reap time. */
+static void __attribute__((noreturn)) user_process_exit(uint32_t exit_code)
+{
+  struct process *p = current_process;
+  if (!p)
+  {
+    for (;;)
+      __asm__ volatile("hlt");
+  }
+  user_free_memory(p);
+  p->exit_code = exit_code;
+  p->state = PROC_STATE_ZOMBIE;
+  current_user_pid = 0;
+  for (;;) /* never scheduled again (ZOMBIE) */
+  {
+    schedule();
+    __asm__ volatile("hlt");
+  }
+}
+
+/* Copy a NUL-terminated string from the caller's user window into a kernel
+ * buffer, rejecting non-printable bytes (paths go to the FAT layer). */
+static int copy_str_from_user(uint32_t uaddr, char *out, uint32_t cap)
+{
+  if (!is_user_addr(uaddr) || cap == 0)
+    return 0;
+  uint32_t i = 0;
+  while (i + 1 < cap)
+  {
+    char c = *(volatile char *)(uaddr + i);
+    if (c == '\0')
+    {
+      out[i] = '\0';
+      return 1;
+    }
+    if (c < ' ' || c > '~')
+      return 0;
+    out[i++] = c;
+  }
+  out[cap - 1] = '\0';
+  return 1;
+}
+
+static uint32_t sys_fork(struct regs *r)
+{
+  struct process *parent = current_process;
+  if (!parent || !parent->is_user_prog || !parent->pd)
+    return 0xFFFFFFFFu;
+  if (pmm_get_free_pages() < (USER_WIN_PAGES + 8))
+    return 0xFFFFFFFFu; /* no room for a copy of the window */
+
+  uint32_t pid = process_alloc(parent->name);
+  if (pid == 0)
+    return 0xFFFFFFFFu;
+  struct process *child = process_get(pid);
+  if (!child)
+    return 0xFFFFFFFFu;
+
+  void *kstack = kmalloc(USER_KSTACK_SIZE);
+  if (!kstack)
+    goto fail;
+  child->kernel_stack = (uint32_t)kstack;
+  child->kernel_stack_size = USER_KSTACK_SIZE;
+
+  for (int i = 0; i < (int)USER_WIN_PAGES; i++)
+  {
+    child->frames[i] = (uint32_t)pmm_alloc_page(0);
+    if (!child->frames[i])
+      goto fail;
+    /* Copy through the identity mapping; valid under the parent's pd. */
+    mem_copy((void *)child->frames[i], (void *)parent->frames[i], 4096);
+  }
+  child->pd = (uint32_t)vmm_create_user_pd(child->frames, (int)USER_WIN_PAGES,
+                                           USER_WIN_BASE);
+  if (!child->pd)
+    goto fail;
+
+  /* The child resumes as if its int 0x80 had just returned, with eax = 0. */
+  uint32_t *ks = (uint32_t *)(child->kernel_stack + child->kernel_stack_size);
+  ks = kstack_push_user_frame(ks, r, 0);
+  child->esp = (uint32_t)ks;
+  child->is_user_prog = 1;
+  child->is_background = parent->is_background;
+  child->state = PROC_STATE_RUNNING;
+  return pid;
+
+fail:
+  process_free(pid);
+  return 0xFFFFFFFFu;
+}
+
+static uint32_t sys_execve(struct regs *r, uint32_t path_u, uint32_t argv_u,
+                           uint32_t envp_u)
+{
+  (void)envp_u; /* accepted for POSIX shape, ignored */
+  struct process *p = current_process;
+  if (!p || !p->is_user_prog || !p->pd)
+    return 0xFFFFFFFFu;
+
+  /* Copy path/argv out of the old image before tearing it down. */
+  char path[64];
+  if (!copy_str_from_user(path_u, path, sizeof(path)))
+    return 0xFFFFFFFFu;
+
+  static char argv_str[16][96];
+  uint32_t argv_ptrs[17];
+  int argc = 0;
+  if (argv_u && argv_u >= USER_WIN_BASE &&
+      argv_u <= USER_WIN_BASE + USER_WIN_SIZE - 68u)
+  {
+    for (int i = 0; i < 16; i++)
+    {
+      uint32_t aptr = *(volatile uint32_t *)(argv_u + 4u * i);
+      if (!aptr)
+        break;
+      if (!copy_str_from_user(aptr, argv_str[i], sizeof(argv_str[i])))
+        return 0xFFFFFFFFu;
+      argv_ptrs[argc++] = (uint32_t)argv_str[i];
+    }
+  }
+  argv_ptrs[argc] = 0;
+
+  uint8_t *img = 0;
+  uint32_t size = 0;
+  if (!fat12_read_file_to_ram(path, &img, &size))
+    return 0xFFFFFFFFu;
+  if (!ajos_bin_valid(img, size) ||
+      pmm_get_free_pages() < (USER_WIN_PAGES + 8))
+  {
+    kfree(img);
+    return 0xFFFFFFFFu;
+  }
+
+  /* Swap in fresh window frames (same private pd, window PTEs rewritten). */
+  for (int i = 0; i < (int)USER_WIN_PAGES; i++)
+  {
+    if (p->frames[i])
+      pmm_free_page((void *)p->frames[i], 0);
+    p->frames[i] = (uint32_t)pmm_alloc_page(0);
+    if (!p->frames[i])
+    {
+      /* Catastrophic (guarded above); keep the mapping consistent anyway. */
+      vmm_remap_window((uint32_t *)p->pd, p->frames, (int)USER_WIN_PAGES,
+                       USER_WIN_BASE);
+      kfree(img);
+      return 0xFFFFFFFFu;
+    }
+  }
+
+  uint32_t esp = 0;
+  uint32_t entry = user_load_image(p, img, size, (char *const *)argv_ptrs, &esp);
+  kfree(img);
+  vmm_remap_window((uint32_t *)p->pd, p->frames, (int)USER_WIN_PAGES,
+                   USER_WIN_BASE);
+
+  /* New identity for ps: use the basename of the path. */
+  const char *base = path;
+  for (const char *c = path; *c; c++)
+    if (*c == '/' || *c == '\\')
+      base = c + 1;
+  if (*base)
+  {
+    int j = 0;
+    for (; j < PROCESS_NAME_LEN - 1 && base[j]; j++)
+      p->name[j] = base[j];
+    p->name[j] = '\0';
+  }
+
+  /* Return straight into the new image by overwriting this trap frame. */
+  r->eip = entry;
+  r->useresp = esp;
+  r->efl = 0x202u;
+  r->cs = USER_CS_SEL;
+  r->ss = USER_DS_SEL;
+  r->ds = r->es = r->fs = r->gs = USER_DS_SEL;
+  r->eax = 0;
+  r->ecx = 0;
+  r->edx = 0;
+  r->ebx = 0;
+  return 0;
+}
+
+static uint32_t sys_waitpid(uint32_t pid, uint32_t status_u)
+{
+  struct process *parent = current_process;
+  if (!parent || !parent->is_user_prog)
+    return 0xFFFFFFFFu;
+
+  for (;;)
+  {
+    int have_child = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++)
+    {
+      struct process *c = &process_table[i];
+      if (!c->in_use || c == parent)
+        continue;
+      if (c->ppid != parent->pid)
+        continue;
+      if (pid != 0 && c->pid != pid)
+        continue;
+      have_child = 1;
+      if (c->state == PROC_STATE_ZOMBIE)
+      {
+        uint32_t reaped = c->pid;
+        uint32_t code = c->exit_code;
+        if (status_u && is_user_addr(status_u))
+          *(volatile uint32_t *)status_u = code;
+        process_free(reaped);
+        return reaped;
+      }
+    }
+    if (!have_child)
+      return 0xFFFFFFFFu;
+    schedule();
+    __asm__ volatile("hlt");
   }
 }
 
@@ -3281,13 +3919,14 @@ static void cmd_wait(const char *arg)
 
   if (pid == 0)
   {
-    // Wait for any background process
+    // Wait for any background process (a ZOMBIE is immediately reapable)
     int found = 0;
     for (int i = 0; i < MAX_PROCESSES; i++)
     {
       if (process_table[i].in_use && process_table[i].is_background &&
           (process_table[i].state == PROC_STATE_RUNNING ||
-           process_table[i].state == PROC_STATE_SLEEPING))
+           process_table[i].state == PROC_STATE_SLEEPING ||
+           process_table[i].state == PROC_STATE_ZOMBIE))
       {
         pid = process_table[i].pid;
         found = 1;
@@ -3318,12 +3957,10 @@ static void cmd_wait(const char *arg)
   log_write_u32(pid);
   log_writestring("...\n");
 
-  // Poll until process is dead (simple implementation)
-  // In a real OS, this would block and be woken by the scheduler
+  // Poll until the process completes (RUNNING/SLEEPING); reap ZOMBIEs.
   uint32_t start_ticks = pit_ticks;
   while (proc->in_use && (proc->state == PROC_STATE_RUNNING ||
-                          proc->state == PROC_STATE_SLEEPING ||
-                          proc->state == PROC_STATE_ZOMBIE))
+                          proc->state == PROC_STATE_SLEEPING))
   {
     // Timeout after 10 seconds
     if ((pit_ticks - start_ticks) > (10 * PIT_HZ))
@@ -3331,7 +3968,19 @@ static void cmd_wait(const char *arg)
       log_writestring("wait: timeout\n");
       return;
     }
+    schedule(); // let it actually run instead of just hlt-ing
     __asm__ volatile("hlt"); // Wait for next interrupt
+  }
+
+  if (proc->in_use && proc->state == PROC_STATE_ZOMBIE)
+  {
+    log_writestring("wait: process ");
+    log_write_u32(pid);
+    log_writestring(" exited with code ");
+    log_write_u32(proc->exit_code);
+    log_putchar('\n');
+    process_free(pid);
+    return;
   }
 
   log_writestring("wait: process ");
@@ -3369,13 +4018,21 @@ static void cmd_kill(const char *arg)
     return;
   }
 
+  /* Never kill the process we are currently executing on behalf of (its
+   * kernel stack is live under us). */
+  if (proc == current_process)
+  {
+    log_writestring("kill: process is currently running\n");
+    return;
+  }
+
   // Mark process as zombie (will be cleaned up later)
   proc->state = PROC_STATE_ZOMBIE;
   log_writestring("kill: process ");
   log_write_u32(pid);
   log_writestring(" terminated\n");
 
-  // For now, immediately free it (in a real OS, parent would wait for it)
+  // Free it and its resources (window, page directory, kernel stack, sockets)
   process_free(pid);
 }
 
@@ -5122,8 +5779,30 @@ static void cmd_netcfg(const char *args)
   }
 }
 
+int vfs_read_file_ram(const char *path, uint8_t **out_buf, uint32_t *out_len);
+
 static void network_auto_setup(void)
 {
+  /* Prefer /etc/NETWORK.CFG from the boot filesystem (persistent static
+   * config for real LANs). Falls back to the QEMU user-net default. */
+  {
+    /* Read via the boot-FAT context (fat12), NOT the VFS: the boot
+     * filesystem is the kernel's own FAT context, not a VFS mount -
+     * vfs_stat("/etc/...") fails here and the static config would never
+     * apply on disk-booted systems. */
+    uint8_t *cfg = 0;
+    uint32_t clen = 0;
+    int got = fat12_read_file_to_ram("etc/NETWORK.CFG", &cfg, &clen);
+    if (!got)
+      got = fat12_read_file_to_ram("/etc/NETWORK.CFG", &cfg, &clen);
+    if (got && cfg && clen > 0)
+    {
+      int res = netcfg_load_from_buffer((const char *)cfg, (int)clen);
+      kfree(cfg);
+      if (res != 0)
+        return; /* config applied (static or DHCP) */
+    }
+  }
   // Hardcode IP for QEMU user-net (10.0.2.15) to bypass filesystem issues
   log_writestring("[NetCfg] Forcing static IP: 10.0.2.15\n");
   arp_set_ajos_ip(0x0A00020F); // 10.0.2.15 in hex
@@ -5268,6 +5947,20 @@ static int http_parse_response(const uint8_t *buf, uint16_t len,
 }
 
 // wget command - download file via HTTP
+/* Wait ~ms while pumping RX. Shell commands issued over SSH run from the
+ * timer/NAPI context where IRQ-driven RX does not advance on its own (and,
+ * with IF=0, neither does pit_ticks) — so every wait must both pump and be
+ * round-bounded. */
+static void cmd_net_wait_ms(uint32_t ms)
+{
+  uint32_t rounds = ms / 10u + 1u;
+  for (uint32_t r = 0; r < rounds; r++)
+  {
+    net_pump_rx(8);
+    sleep_ms(10);
+  }
+}
+
 static void cmd_wget(const char *args)
 {
   const char *s = skip_spaces(args);
@@ -5295,6 +5988,30 @@ static void cmd_wget(const char *args)
     host[hi++] = *s++;
   }
   host[hi] = '\0';
+
+  /* Optional ":port" in the host part (default 80). */
+  uint16_t port = 80;
+  for (int i = 0; i < hi; i++)
+  {
+    if (host[i] == ':')
+    {
+      uint32_t pv = 0;
+      int bad = 0;
+      for (int j = i + 1; host[j]; j++)
+      {
+        if (host[j] < '0' || host[j] > '9')
+        {
+          bad = 1;
+          break;
+        }
+        pv = pv * 10u + (uint32_t)(host[j] - '0');
+      }
+      if (!bad && pv >= 1u && pv <= 65535u)
+        port = (uint16_t)pv;
+      host[i] = '\0';
+      break;
+    }
+  }
 
   const char *path = *s ? s : "/";
 
@@ -5348,7 +6065,8 @@ static void cmd_wget(const char *args)
   dns_lookup(host);
 
   uint32_t start = pit_ticks;
-  while ((pit_ticks - start) < (PIT_HZ * 3u))
+  int dns_rounds = 0;
+  while ((pit_ticks - start) < (PIT_HZ * 3u) && dns_rounds++ < 60)
   {
     net_pump_rx(8);
     if (dns_got_reply)
@@ -5356,7 +6074,7 @@ static void cmd_wget(const char *args)
       ip = dns_last_ip;
       break;
     }
-    sleep_ms(50);
+    cmd_net_wait_ms(50);
   }
 
   // If DNS failed, try parsing host as IP
@@ -5385,9 +6103,10 @@ static void cmd_wget(const char *args)
   int connected = 0;
   for (int attempt = 0; attempt < 2; attempt++)
   {
-    tcp_connect(pcb, ip, 80);
+    tcp_connect(pcb, ip, port);
     start = pit_ticks;
-    while ((pit_ticks - start) < (PIT_HZ * 6u))
+    int rounds = 0;
+    while ((pit_ticks - start) < (PIT_HZ * 6u) && rounds++ < 120)
     {
       if (pcb->state == TCP_ESTABLISHED)
       {
@@ -5398,12 +6117,12 @@ static void cmd_wget(const char *args)
       {
         break;
       }
-      sleep_ms(50);
+      cmd_net_wait_ms(50);
     }
     if (connected)
       break;
     pcb->state = TCP_CLOSED;
-    sleep_ms(100);
+    cmd_net_wait_ms(100);
   }
 
   if (!connected)
@@ -5436,8 +6155,9 @@ static void cmd_wget(const char *args)
 
   // Wait for response
   start = pit_ticks;
+  int resp_rounds = 0;
   int found_http = 0;
-  while ((pit_ticks - start) < (PIT_HZ * 10u))
+  while ((pit_ticks - start) < (PIT_HZ * 10u) && resp_rounds++ < 200)
   {
     uint16_t max = pcb->app_rx_len;
     if (max > 512)
@@ -5454,7 +6174,7 @@ static void cmd_wget(const char *args)
     }
     if (found_http)
       break;
-    sleep_ms(50);
+    cmd_net_wait_ms(50);
   }
 
   if (pcb->app_rx_len == 0)
@@ -6213,7 +6933,7 @@ static void cmd_eth_stat(void)
   log_writestring("  MAC: ");
   for (int i = 0; i < 6; i++)
   {
-    log_write_hex32(e1000_mac[i]);
+    log_write_hex32(e1000_mac[0][i]);
     if (i < 5)
       log_putchar(':');
   }
@@ -7089,6 +7809,57 @@ static void vfs_cmd_cat(const char *args)
 /* install <file> <name> -- copies <file> to /opt/<name>.aj so it can be
  * pulled into a script with `import "<name>"`. Thin wrapper around the
  * existing cp command; no new copy logic needed. */
+/* install-to-disk - mirror the boot floppy (2880 sectors, 1.44 MB) onto the
+ * primary ATA disk so the machine boots AJOS standalone from its own disk.
+ * The bootloader is geometry-agnostic (int 13h AH=08h per boot drive), so the
+ * mirrored layout boots on HDD/IDE without modification. WARNING: overwrites
+ * the first 1.44 MB of the target disk (guest data on /mnt is lost). */
+static void cmd_install_to_disk(const char *args)
+{
+  (void)args;
+  static uint8_t sec[512];
+  int fails = 0;
+  log_writestring("[INSTALL] Mirroring boot floppy -> ATA disk (2880 sectors)\n");
+  for (uint32_t lba = 0; lba < 2880; lba++)
+  {
+    if (!disk_read_sector(0x00, lba, sec))
+    {
+      fails++;
+      log_writestring("[INSTALL] floppy read fail LBA ");
+      log_write_u32(lba);
+      log_putchar('\n');
+      continue;
+    }
+    if (!ata_write_sector(lba, sec))
+    {
+      fails++;
+      log_writestring("[INSTALL] ata write fail LBA ");
+      log_write_u32(lba);
+      log_putchar('\n');
+    }
+    if ((lba % 512) == 0)
+    {
+      log_writestring("[INSTALL] progress LBA ");
+      log_write_u32(lba);
+      log_putchar('\n');
+    }
+  }
+  /* Verify: boot signature on LBA 0 + kernel magic on LBA 1 */
+  uint8_t chk[512];
+  int sig_ok = 0;
+  if (ata_read_sector(0, chk) && chk[510] == 0x55 && chk[511] == 0xAA)
+    sig_ok = 1;
+  log_writestring("[INSTALL] done. fails=");
+  log_write_u32((uint32_t)fails);
+  log_writestring(" boot_signature=");
+  log_write_u32((uint32_t)sig_ok);
+  log_putchar('\n');
+  if (fails == 0 && sig_ok)
+    log_writestring("[INSTALL] SUCCESS - reboot from the ATA disk (boot order c).\n");
+  else
+    log_writestring("[INSTALL] FAILED - do not reboot from disk.\n");
+}
+
 static void cmd_install(const char *args)
 {
   const char *s = skip_spaces(args);
@@ -7159,6 +7930,117 @@ static void cmd_install(const char *args)
  * keeps using its original buffer unchanged). Returns NULL with *err set
  * to 1 when an import line was found but its package could not be loaded
  * (an error has already been printed) -- caller should abort. */
+/* ---- ajlangweb: run a .aj web script for the HTTP server ----
+ * Loads the script from the FAT, splices `import` packages, injects the
+ * request context (method/path/query/body), runs it with `print` captured
+ * into `out`, and reports redirects. Returns: body length, -1 on error,
+ * -2 when the script issued web_redirect (location copied to `redirect`). */
+/* VFS file read into a kmalloc'd buffer (caller kfrees). Returns 1/0.
+ * Used by the web stack so request-time reads hit the IDE disk (fast)
+ * instead of the floppy (motor-timing wedges the kernel in QEMU). */
+int vfs_read_file_ram(const char *path, uint8_t **out_buf, uint32_t *out_len)
+{
+  uint32_t size = 0;
+  *out_buf = 0;
+  *out_len = 0;
+  if (!vfs_stat(vfs_get_global(), path, &size))
+    return 0;
+  if (size == 0)
+    return 1;
+  uint8_t *buf = (uint8_t *)kmalloc(size + 1);
+  if (!buf)
+    return 0;
+  int fd = vfs_open(vfs_get_global(), path, VFS_FD_READ);
+  if (fd < 0)
+  {
+    kfree(buf);
+    return 0;
+  }
+  int rd = vfs_read(vfs_get_global(), fd, buf, size);
+  vfs_close(vfs_get_global(), fd);
+  if (rd <= 0)
+  {
+    kfree(buf);
+    return 0;
+  }
+  buf[rd] = 0;
+  *out_buf = buf;
+  *out_len = (uint32_t)rd;
+  return 1;
+}
+
+static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err);
+
+int ajlang_run_webapp(const char *script_path, const char *method,
+                      const char *uri, const char *body, char *out,
+                      int outcap, char *redirect, int redcap)
+{
+  static int webapp_busy = 0;
+  if (webapp_busy)
+    return -1;
+  webapp_busy = 1;
+
+  uint8_t *src = 0;
+  uint32_t slen = 0;
+  int ok = 0;
+  /* Prefer the IDE-disk copy (/mnt/webapp/...): floppy reads inside the
+   * network dispatch intermittently wedge the kernel (QEMU floppy motor
+   * timing) -- the user-visible freeze. Fall back to boot-FAT for apps
+   * not staged on /mnt. */
+  {
+    char mnt_path[128];
+    int mi = 0;
+    const char *mntpre = "/mnt/";
+    while (mntpre[mi]) { mnt_path[mi] = mntpre[mi]; mi++; }
+    int wi = 0;
+    while (script_path[wi] && mi < 126) { mnt_path[mi++] = script_path[wi++]; }
+    mnt_path[mi] = 0;
+    if (vfs_read_file_ram(mnt_path, &src, &slen))
+      ok = 1;
+    else
+      ok = fat12_read_file_to_ram(script_path, &src, &slen);
+  }
+  if (!ok || !src || slen == 0)
+  {
+    webapp_busy = 0;
+    return -1;
+  }
+
+  /* Split uri into path + query at the first '?' */
+  char upath[128];
+  const char *uquery = "";
+  int ui = 0;
+  while (uri[ui] && uri[ui] != '?' && ui < 127)
+  {
+    upath[ui] = uri[ui];
+    ui++;
+  }
+  upath[ui] = 0;
+  if (uri[ui] == '?')
+    uquery = uri + ui + 1;
+
+  int err = 0;
+  uint8_t *combined = ajlang_splice_imports(src, slen, &err);
+
+  webreq_begin(method, upath, uquery, body ? body : "");
+  ajlang_capture_begin(out, outcap);
+  ajlang_run((const char *)(combined ? combined : src));
+  int olen = ajlang_capture_len();
+  webreq_end();
+
+  if (combined)
+    kfree(combined);
+  kfree(src);
+
+  if (webreq_take_redirect(redirect, redcap))
+  {
+    webapp_busy = 0;
+    return -2;
+  }
+  webapp_busy = 0;
+  return olen;
+}
+
 static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err)
 {
   *err = 0;
@@ -7243,7 +8125,19 @@ static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err)
 
     uint8_t *pb = 0;
     uint32_t psz = 0;
-    if (!fat12_read_file_to_ram(pkg_path, &pb, &psz))
+    /* Prefer the IDE-disk package copy (/mnt/opt/<name>.aj). */
+    {
+      char mnt_pkg[96];
+      const char *mntopt = "/mnt/";
+      int mi2 = 0;
+      while (mntopt[mi2]) { mnt_pkg[mi2] = mntopt[mi2]; mi2++; }
+      int pi2 = 0;
+      while (pkg_path[pi2] && mi2 < 94) { mnt_pkg[mi2++] = pkg_path[pi2++]; }
+      mnt_pkg[mi2] = 0;
+      if (!vfs_read_file_ram(mnt_pkg, &pb, &psz))
+        fat12_read_file_to_ram(pkg_path, &pb, &psz);
+    }
+    if (!pb || !psz)
     {
       log_writestring("ajlang: import not found: ");
       log_writestring(names[m]);
@@ -7400,15 +8294,6 @@ static void vfs_cmd_ajlang(const char *args)
   kfree(buf);
 }
 
-struct __attribute__((packed)) ajos_bin_hdr
-{
-  char magic[7]; // "AJOSBIN"
-  uint8_t version;
-  uint32_t entry_off;
-  uint32_t data_off;
-  uint32_t data_len;
-};
-
 static void cmd_jobs(void)
 {
   log_writestring("JOB  PID  STATE      NAME\n");
@@ -7476,6 +8361,9 @@ static void cmd_loadbin(const char *arg)
   }
   file_slots[slot].ptr = buf;
   file_slots[slot].size = size;
+  for (i = 0; i < (int)sizeof(file_slots[slot].name) - 1 && fn[i]; i++)
+    file_slots[slot].name[i] = fn[i];
+  file_slots[slot].name[i] = '\0';
   log_writestring("Loaded ");
   log_writestring(fn);
   log_writestring(" (");
@@ -7570,27 +8458,44 @@ static void cmd_run3(const char *arg, int bg)
   }
   if (file_slots[id].ptr == (void *)0)
     return;
-  const struct ajos_bin_hdr *hdr =
-      (const struct ajos_bin_hdr *)file_slots[id].ptr;
-  const uint32_t PROG_LOAD_ADDR = 0x00300000u;
-  const uint32_t USER_STACK_TOP = 0x00330000u;
-  mem_copy((void *)PROG_LOAD_ADDR, file_slots[id].ptr, file_slots[id].size);
-  uint32_t pid = process_alloc(file_slots[id].name);
+
+  char *argv[2];
+  argv[0] = file_slots[id].name;
+  argv[1] = 0;
+  uint32_t pid =
+      user_spawn(file_slots[id].name, (const uint8_t *)file_slots[id].ptr,
+                 file_slots[id].size, argv, bg);
   if (pid == 0)
-    return;
-  struct process *proc = process_get(pid);
-  if (proc)
-    proc->is_background = bg;
-  current_user_pid = pid;
-  enter_user_mode((uint32_t)(PROG_LOAD_ADDR + hdr->entry_off), USER_STACK_TOP);
-  current_user_pid = 0;
-  proc = process_get(pid);
-  if (proc)
   {
-    proc->state = PROC_STATE_DEAD;
-    process_free(pid);
+    log_writestring("run3: could not spawn ");
+    log_writestring(file_slots[id].name);
+    log_writestring(" (bad image or out of memory)\n");
+    return;
   }
-  __asm__ volatile("sti");
+
+  struct process *proc = process_get(pid);
+  if (bg || !proc)
+  {
+    log_writestring("run3: started ");
+    log_writestring(file_slots[id].name);
+    log_writestring(" (pid ");
+    log_write_u32(pid);
+    log_writestring(")\n");
+    return;
+  }
+
+  /* Foreground: let it run to completion, like a POSIX shell. */
+  while (proc->in_use && proc->state != PROC_STATE_ZOMBIE)
+  {
+    schedule();
+    __asm__ volatile("hlt"); // Wait for next interrupt
+  }
+  log_writestring("run3: ");
+  log_writestring(file_slots[id].name);
+  log_writestring(" exited with code ");
+  log_write_u32(proc->exit_code);
+  log_putchar('\n');
+  process_free(pid);
 }
 
 static void shell_dispatch(const char *line)
@@ -8174,6 +9079,10 @@ static void shell_dispatch(const char *line)
     cmd_cp(fn);
     return;
   }
+  if (cmd_clean_len == 11 && kstrcmp_n(cmd_clean, "installdisk", 11) == 0)
+  {
+    cmd_install_to_disk(rest);
+  }
   if (cmd_clean_len == 7 && kstrcmp_n(cmd_clean, "install", 7) == 0)
   {
     cmd_install(rest);
@@ -8641,6 +9550,14 @@ void kernel_main()
   /* Ensure syscall-from-user stack is valid: TSS.esp0 used on int 0x80 must be
    * mapped. */
   tss_set_esp0(0x1FF000u);
+  /* Load the task register: without TR, any ring3->ring0 transition (int 0x80,
+   * IRQ, fault) cannot switch stacks and the CPU faults ("invalid tss type").
+   * Must happen after the GDT is installed (gdt.asm ltr_load; QEMU rejects the
+   * in-asm ltr right after lgdt). */
+  {
+    extern void ltr_load(void);
+    ltr_load();
+  }
   /* Agent log: confirm TSS.esp0 set (for debug) */
   {
     uint32_t esp0_val = tss_get_esp0();
@@ -8806,12 +9723,6 @@ void kernel_main()
     agent_dbg_enabled = 0;
   }
 
-  /* Runtime logs (SSH sessions, network activity, services) go to
-   * /var/log/ajos instead of the console. Boot messages above stay on the
-   * console. Use "syslog console" to mirror logs back, "syslog stop" to
-   * disable. */
-  syslog_enabled = 1;
-
 #ifdef AJOS_NET_AUTOTEST
   log_writestring("[AUTOTEST] Network smoke test starting...\n");
   // Verify ARP to gateway, ping gateway, DNS, then ping a public IP.
@@ -8827,6 +9738,14 @@ void kernel_main()
   log_writestring("[AUTOTEST] Done. Powering off.\n");
   poweroff_now();
 #endif
+
+  /* Runtime logs (SSH sessions, network activity, services) go to
+   * /var/log/ajos instead of the console. Boot messages above stay on the
+   * console. Use "syslog console" to mirror logs back, "syslog stop" to
+   * disable. Enabled AFTER the autotest block: the syslog classifier
+   * captures "[TAG]" lines like "[AUTOTEST]", and tools/net_autotest.py
+   * greps for those on the console. */
+  syslog_enabled = 1;
 
   outb(0x3F8, (uint8_t)'P'); /* Prompt beacon */
 

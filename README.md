@@ -32,7 +32,18 @@ If **QEMU segfaults on macOS** (e.g. "Segmentation fault: 11"), especially on **
 - **Option B:** Upgrade macOS to 15.4 or later; the prebuilt QEMU bottle then works.
 - **Option C:** Build the image and run elsewhere: `make run-console-img`, copy `build/ajos.run.img` to a Linux machine, then run: `qemu-system-i386 -m 512M -boot a -drive file=ajos.run.img,format=raw,if=floppy -nographic -serial stdio -no-reboot`
 
-**Serial console:** With `make run-console`, the AJOS shell and all kernel output appear in the **terminal** (serial), not in the QEMU window. Log in at the prompt and run `ls` (should list README.TXT, HELLO.AJ, STORIES.BIN, TOK512.BIN, PASSWD, etc.) and `llm hello`.
+**Serial console:** With `make run-console`, the AJOS shell and all kernel output appear in the **terminal** (serial), not in the QEMU window. Log in at the prompt and run `ls` (should list README.TXT, HELLO.AJ, STORIES.BIN, TOK512.BIN, PASSWD, FORKDEMO.BIN, CHILD.BIN, etc.) and `llm hello`.
+
+**Processes — fork/execve/waitpid:** Ring-3 programs get real process semantics:
+
+```sh
+loadbin FORKDEMO.BIN 0   # copy an AJOSBIN from FAT into slot 0
+run3 0                   # spawn as a scheduled ring-3 process (foreground)
+run3 0 &                 # background; use ps / wait / kill
+```
+
+Each process has its own page directory: the fixed user window (0x300000–0x340000) is privately mapped to per-process frames, and user code can only touch that window (kernel memory is supervisor-only in user address spaces). The timer preempts processes at ring-3 boundaries (100 ms quantum); `sleep` blocks via a SLEEPING state instead of busy-waiting. New syscalls (see `asm/ajos_syscall.inc`): `fork` (16), `execve` (17, loads an AJOSBIN from the boot FAT; argv is copied onto the fresh stack), `waitpid` (18); `exit` (5) now takes an exit code in `ebx`. `make test-fork` runs an end-to-end QEMU test that logs in over serial and exercises fork → waitpid → execve in both foreground and background.
+
 
 **Network smoke test (QEMU):** From the repo root, run `make test-net`. This builds with `AJOS_NET_AUTOTEST`, boots in QEMU, runs ARP + `ping 10.0.2.2` + DNS + `ping 1.1.1.1`, then shuts down. Closes other QEMU instances first if you see a disk “lock” error. Log: `build/net-autotest.log`.
 

@@ -34,6 +34,103 @@ static uint32_t *get_page_table(uint32_t *pd, uint32_t virt, int make,
   return pt;
 }
 
+uint32_t *vmm_get_kernel_pd(void) { return kernel_pd; }
+
+uint32_t *vmm_current_pd(void) {
+  uint32_t cr3;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+  return (uint32_t *)cr3;
+}
+
+void vmm_load_pd(uint32_t *pd) {
+  if (pd && pd != vmm_current_pd())
+    __asm__ volatile("mov %0, %%cr3" : : "r"((uint32_t)pd) : "memory");
+}
+
+/* Build the private PDE[0] page table for a user process: identity map of the
+ * low 4MB as supervisor-only, except the user window pages, which map to the
+ * process's own frames with user access. */
+static uint32_t *vmm_build_window_pt(const uint32_t *frames, int nframes,
+                                     uint32_t win_virt) {
+  uint32_t *pt = (uint32_t *)pmm_alloc_page(0);
+  if (!pt)
+    return NULL;
+  for (int i = 0; i < 1024; i++)
+    pt[i] = ((uint32_t)i << 12) | VMM_PRESENT | VMM_WRITABLE;
+  for (int i = 0; i < nframes; i++) {
+    uint32_t v = win_virt + (uint32_t)i * PAGE_SIZE;
+    if (frames[i])
+      pt[(v >> 12) & 0x3FFu] =
+          (frames[i] & 0xFFFFF000u) | VMM_PRESENT | VMM_WRITABLE | VMM_USER;
+    else
+      pt[(v >> 12) & 0x3FFu] = 0; /* no frame: keep unmapped */
+  }
+  return pt;
+}
+
+/* Create a user page directory: kernel_pd clone with the user bit stripped
+ * everywhere (kernel keeps supervisor access via ring 0) and a private PDE[0]
+ * table that only exposes the process window to ring 3. Returns NULL (and
+ * frees partial allocations) on failure. */
+uint32_t *vmm_create_user_pd(const uint32_t *frames, int nframes,
+                             uint32_t win_virt) {
+  if (!kernel_pd || !frames || nframes <= 0)
+    return NULL;
+  uint32_t *pt = vmm_build_window_pt(frames, nframes, win_virt);
+  if (!pt)
+    return NULL;
+  uint32_t *pd = (uint32_t *)pmm_alloc_page(0);
+  if (!pd) {
+    pmm_free_page(pt, 0);
+    return NULL;
+  }
+  for (int i = 0; i < 1024; i++) {
+    if (i == (win_virt >> 22)) {
+      /* User bit required here too: x86 checks U/S at BOTH the PDE and PTE,
+       * so a supervisor-only PDE makes the whole 4MB region ring-3-proof. */
+      pd[i] = ((uint32_t)pt) | VMM_PRESENT | VMM_WRITABLE | VMM_USER;
+    } else if (kernel_pd[i] & VMM_PRESENT) {
+      /* Share the kernel's page tables, but supervisor-only. */
+      pd[i] = kernel_pd[i] & ~VMM_USER;
+    } else {
+      pd[i] = 0;
+    }
+  }
+  return pd;
+}
+
+/* Rewrite the window PTEs of an existing user pd (execve: same process, new
+ * frames). Reloads cr3 for a full flush when pd is live. */
+void vmm_remap_window(uint32_t *pd, const uint32_t *frames, int nframes,
+                      uint32_t win_virt) {
+  if (!pd)
+    return;
+  uint32_t pde = pd[win_virt >> 22];
+  uint32_t *pt = (uint32_t *)(pde & 0xFFFFF000u);
+  for (int i = 0; i < nframes; i++) {
+    uint32_t v = win_virt + (uint32_t)i * PAGE_SIZE;
+    if (frames[i])
+      pt[(v >> 12) & 0x3FFu] =
+          (frames[i] & 0xFFFFF000u) | VMM_PRESENT | VMM_WRITABLE | VMM_USER;
+    else
+      pt[(v >> 12) & 0x3FFu] = 0; /* no frame: keep unmapped */
+  }
+  if (pd == vmm_current_pd())
+    __asm__ volatile("mov %0, %%cr3" : : "r"((uint32_t)pd) : "memory");
+}
+
+/* Free a user pd created by vmm_create_user_pd. Caller must not be running on
+ * it (switch to kernel_pd first). The user window (0x300000) lives in PDE[0],
+ * so that is always the private table to free. */
+void vmm_destroy_user_pd(uint32_t *pd) {
+  if (!pd || pd == kernel_pd)
+    return;
+  uint32_t *pt = (uint32_t *)(pd[0] & 0xFFFFF000u);
+  if (pt)
+    pmm_free_page(pt, 0);
+  pmm_free_page(pd, 0);
+}
+
 int vmm_map_page(uint32_t *pd, uint32_t virt, uint32_t phys, uint32_t flags) {
   uint32_t *pt = get_page_table(pd, virt, 1, flags);
   if (!pt)

@@ -8,6 +8,7 @@
 #include "kernel.h"
 #include "net.h"
 #include "fat.h"
+#include "vfs.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -25,6 +26,176 @@ extern size_t kstrlen(const char *s);
 #ifndef AJLANG_PIT_HZ
 #define AJLANG_PIT_HZ 100u
 #endif
+
+/* ---- ajlangweb: HTTP request context + output capture ----
+ * The HTTP server (src/http.c) sets a request context via webreq_begin(),
+ * runs a script with ajlang_capture_begin() so `print` lands in the response
+ * buffer instead of the console, then reads the result. Builtins
+ * web_method/web_path/web_query/web_form/web_redirect expose the request. */
+static char g_web_method[16];
+static char g_web_path[128];
+static char g_web_query[256];
+static char g_web_body[512];
+static char g_web_redirect[160];
+static int g_web_redirect_flag;
+static char *g_out_buf;
+static int g_out_cap;
+static int g_out_len;
+
+static void aj_out_puts(const char *s)
+{
+  if (!g_out_buf)
+  {
+    log_writestring(s);
+    return;
+  }
+  while (*s && g_out_len < g_out_cap - 1)
+    g_out_buf[g_out_len++] = *s++;
+  g_out_buf[g_out_len] = 0;
+}
+
+static void aj_out_ch(char c)
+{
+  if (!g_out_buf)
+  {
+    log_putchar(c);
+    return;
+  }
+  if (g_out_len < g_out_cap - 1)
+    g_out_buf[g_out_len++] = c;
+}
+
+static void aj_out_num(unsigned v)
+{
+  char tmp[12];
+  int n = 0;
+  if (v == 0)
+    tmp[n++] = '0';
+  while (v > 0 && n < 11)
+  {
+    tmp[n++] = (char)('0' + v % 10);
+    v /= 10;
+  }
+  char out[12];
+  for (int i = 0; i < n; i++)
+    out[i] = tmp[n - 1 - i];
+  out[n] = 0;
+  aj_out_puts(out);
+}
+
+void ajlang_capture_begin(char *buf, int cap)
+{
+  g_out_buf = buf;
+  g_out_cap = cap;
+  g_out_len = 0;
+  if (buf && cap > 0)
+    buf[0] = 0;
+}
+
+int ajlang_capture_len(void) { return g_out_len; }
+
+static void weburl_decode(const char *in, char *out, int cap)
+{
+  int o = 0;
+  for (int i = 0; in[i] && o < cap - 1; i++)
+  {
+    if (in[i] == '+')
+    {
+      out[o++] = ' ';
+    }
+    else if (in[i] == '%' && in[i + 1] && in[i + 2])
+    {
+      int hi = in[i + 1], lo = in[i + 2];
+      int hv = (hi >= '0' && hi <= '9') ? hi - '0' : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
+                              : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : -1;
+      int lv = (lo >= '0' && lo <= '9') ? lo - '0' : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
+                              : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
+      if (hv >= 0 && lv >= 0)
+      {
+        out[o++] = (char)(hv * 16 + lv);
+        i += 2;
+      }
+      else
+        out[o++] = in[i];
+    }
+    else
+      out[o++] = in[i];
+  }
+  out[o] = 0;
+}
+
+/* Find name= in a query/body string and URL-decode the value into out. */
+static void webparam(const char *src, const char *name, char *out, int cap)
+{
+  out[0] = 0;
+  char pat[80];
+  int n = 0;
+  while (name[n] && n < 60)
+  {
+    pat[n] = name[n];
+    n++;
+  }
+  pat[n++] = '=';
+  pat[n] = 0;
+  /* inline substring search for pat in src */
+  const char *hit = 0;
+  for (int si = 0; src[si] && !hit; si++)
+  {
+    int mi = 0;
+    while (pat[mi] && src[si + mi] == pat[mi])
+      mi++;
+    if (pat[mi] == 0)
+      hit = src + si;
+  }
+  if (!hit)
+    return;
+  hit += n;
+  char raw[300];
+  int r = 0;
+  while (*hit && *hit != '&' && r < 290)
+    raw[r++] = *hit++;
+  raw[r] = 0;
+  weburl_decode(raw, out, cap);
+}
+
+
+void webreq_begin(const char *method, const char *path, const char *query,
+                  const char *body)
+{
+  int i = 0;
+  while (method[i] && i < 15) { g_web_method[i] = method[i]; i++; }
+  g_web_method[i] = 0;
+  i = 0;
+  while (path[i] && i < 127) { g_web_path[i] = path[i]; i++; }
+  g_web_path[i] = 0;
+  i = 0;
+  while (query[i] && i < 255) { g_web_query[i] = query[i]; i++; }
+  g_web_query[i] = 0;
+  i = 0;
+  while (body[i] && i < 511) { g_web_body[i] = body[i]; i++; }
+  g_web_body[i] = 0;
+  g_web_redirect_flag = 0;
+  g_web_redirect[0] = 0;
+}
+
+void webreq_end(void)
+{
+  g_web_method[0] = 0;
+  g_web_path[0] = 0;
+  g_web_query[0] = 0;
+  g_web_body[0] = 0;
+  g_web_redirect_flag = 0;
+}
+
+int webreq_take_redirect(char *out, int cap)
+{
+  if (!g_web_redirect_flag)
+    return 0;
+  int i = 0;
+  while (g_web_redirect[i] && i < cap - 1) { out[i] = g_web_redirect[i]; i++; }
+  out[i] = 0;
+  return 1;
+}
 
 /* Format IPv4 as dotted decimal into out (null-terminated). */
 static void format_ipv4(uint32_t ip, char *out, int maxlen)
@@ -85,6 +256,37 @@ static int builtin_dns_lookup(const char *name, char *out, int maxlen)
  * result got cut off. Tries the RAM file-slot cache first (same order
  * `cat`/`ajlang` itself use), then disk. */
 static void builtin_file_read(const char *path, char *out, int maxlen) {
+  /* VFS-aware: /mnt/* reads through the VFS (IDE secondary disk, fast).
+   * Everything else stays on the boot FAT as before. */
+  if (path[0] == '/' && path[1] == 'm' && path[2] == 'n' && path[3] == 't' &&
+      path[4] == '/')
+  {
+    out[0] = 0;
+    int mount_id = -1;
+    char fs_path[VFS_MAX_PATH_LEN];
+    if (!vfs_resolve_path(vfs_get_global(), path, &mount_id, fs_path))
+      return;
+    struct vfs_mount *m = &vfs_get_global()->mounts[mount_id];
+    if (m->fstype == VFS_FSTYPE_FAT)
+    {
+      fat12_ctx *fctx = (fat12_ctx *)m->fs_ctx;
+      /* NOTE: no fat12_reload here - the ctx is the persistent in-memory
+       * view shared across requests; reloading would discard files created
+       * by earlier requests that are not yet re-read from disk. */
+      uint8_t *fbuf = 0;
+      uint32_t fsize = 0;
+      if (!fat12_read_file_to_ram_ex(fctx, fs_path, &fbuf, &fsize))
+        return;
+      if (fsize > (uint32_t)(maxlen - 1))
+        fsize = (uint32_t)(maxlen - 1);
+      for (uint32_t fi = 0; fi < fsize; fi++)
+        out[fi] = (char)fbuf[fi];
+      out[fsize] = 0;
+      kfree(fbuf);
+    }
+    return;
+  }
+
   out[0] = 0;
   if (!path || !path[0])
     return;
@@ -108,6 +310,25 @@ static int builtin_file_write(const char *path, const char *content) {
   if (!path || !path[0])
     return 0;
   size_t len = kstrlen(content);
+  /* VFS-aware: /mnt/* writes through the VFS (IDE secondary disk, fast).
+   * Boot-FAT writes take ~50 s in QEMU (floppy motor timing) which wedges
+   * live web requests. */
+  if (path[0] == '/' && path[1] == 'm' && path[2] == 'n' && path[3] == 't' &&
+      path[4] == '/')
+  {
+    int mount_id = -1;
+    char fs_path[VFS_MAX_PATH_LEN];
+    if (!vfs_resolve_path(vfs_get_global(), path, &mount_id, fs_path))
+      return 0;
+    struct vfs_mount *m = &vfs_get_global()->mounts[mount_id];
+    if (m->fstype == VFS_FSTYPE_FAT)
+    {
+      fat12_ctx *fctx = (fat12_ctx *)m->fs_ctx;
+      return fat12_write_file_ex(fctx, fs_path, (const uint8_t *)content,
+                                 (uint32_t)len);
+    }
+    return 0;
+  }
   return fat12_write_file(path, (const uint8_t *)content, (uint32_t)len);
 }
 
@@ -332,7 +553,7 @@ static int builtin_http_fetch(const char *url, char *out, int maxlen,
  * /opt/*.aj packages spliced into the same source before lexing (see
  * vfs_cmd_ajlang in kernel.c) -- each package adds its own def bodies to
  * this one flat token stream and function table. */
-#define MAX_TOKENS   1536
+#define MAX_TOKENS   4096
 #define MAX_IDENT    32
 #define MAX_VARS     64
 #define MAX_FUNCS    32
@@ -730,6 +951,61 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
           editor_open(ARG_STR(0));
         return;
       }
+      if (kstrcmp_n(t->str_val, "web_method", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+        {
+          int wi = 0;
+          while (g_web_method[wi] && wi < maxlen - 1) { out_str[wi] = g_web_method[wi]; wi++; }
+          out_str[wi] = 0;
+        }
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "web_path", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+        {
+          int wi = 0;
+          while (g_web_path[wi] && wi < maxlen - 1) { out_str[wi] = g_web_path[wi]; wi++; }
+          out_str[wi] = 0;
+        }
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "web_query", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+          webparam(g_web_query, ARG_STR(0), out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "web_form", MAX_IDENT) == 0) {
+        *out_is_num = 0; *out_num = 0; out_str[0] = 0;
+        if (!g_define_pass)
+          webparam(g_web_body, ARG_STR(0), out_str, maxlen > 0 ? maxlen : STR_BUF_SIZE);
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "web_redirect", MAX_IDENT) == 0) {
+        *out_is_num = 1; out_str[0] = 0; *out_num = 1;
+        if (!g_define_pass)
+        {
+          int wi = 0;
+          while (ARG_STR(0)[wi] && wi < 155) { g_web_redirect[wi] = ARG_STR(0)[wi]; wi++; }
+          g_web_redirect[wi] = 0;
+          g_web_redirect_flag = 1;
+        }
+        return;
+      }
+      if (kstrcmp_n(t->str_val, "num", MAX_IDENT) == 0) {
+        *out_is_num = 1; out_str[0] = 0;
+        {
+          const char *np = ARG_STR(0);
+          int64_t nv = 0; int nneg = 0; int nany = 0;
+          if (*np == '-') { nneg = 1; np++; }
+          while (*np >= '0' && *np <= '9') { nv = nv * 10 + (*np - '0'); np++; nany = 1; }
+          *out_num = (nany && !nneg) ? nv : (nany ? -nv : 0);
+          if (!nany) *out_num = 0;
+        }
+        return;
+      }
 #undef ARG_STR
 #undef ARG_NUM
 
@@ -756,6 +1032,12 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
         return;
       }
       int old_pos = g_tok_pos;
+      /* Save the caller's return flag: without this, any user function that
+       * executes `return` (e.g. web_esc inside a web app) leaks g_return_flag=1
+       * into the caller, and the enclosing if/while/for body loop
+       * (`while (... && !g_return_flag)`) aborts right after the call --
+       * silently skipping the rest of the block. */
+      int saved_return_flag = g_return_flag;
       g_return_flag = 0;
       for (int i = 0; i < f->nparams; i++) {
         struct Var *pv = get_or_add_var(f->params[i]);
@@ -785,6 +1067,7 @@ static void parse_primary(int *out_is_num, int64_t *out_num, char *out_str, int 
         run_statement();
       }
       g_tok_pos = old_pos;
+      g_return_flag = saved_return_flag;
       *out_is_num = !g_return_is_str;  /* g_return_is_str=1 means string, so out_is_num=0 */
       *out_num = g_return_val;
       mem_copy(out_str, g_return_str, maxlen);
@@ -987,11 +1270,11 @@ static void run_statement(void) {
     if (!g_define_pass) {
       s[STR_BUF_SIZE - 1] = 0;
       if (is_num) {
-        log_write_u32((uint32_t)n);
-        log_putchar('\n');
+        aj_out_num((unsigned)n);
+        aj_out_ch('\n');
       } else {
-        log_writestring(s);
-        log_putchar('\n');
+        aj_out_puts(s);
+        aj_out_ch('\n');
       }
     }
     return;

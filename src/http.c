@@ -11,6 +11,8 @@ extern void log_putchar(char c);
 extern struct tcp_pcb *tcp_get_free_pcb(void);
 extern int tcp_send_data(struct tcp_pcb *pcb, const uint8_t *data,
                          uint16_t len);
+extern int tcp_send(struct tcp_pcb *pcb, const uint8_t *data,
+                  uint16_t len);
 extern void kfree(void *ptr);
 
 static int _strlen(const char *s) {
@@ -24,46 +26,72 @@ static int _strlen(const char *s) {
 // by http_send_page so Content-Length is always correct)
 static const char *html_login_page =
     "<!DOCTYPE html>\n"
-    "<html>\n"
+    "<html lang=\"en\">\n"
     "<head>\n"
-    "  <title>WiFi Login</title>\n"
-    "  <style>\n"
-    "    body { font-family: Arial; text-align: center; padding: 50px; }\n"
-    "    h1 { color: #333; }\n"
-    "    form { margin: 20px auto; max-width: 300px; }\n"
-    "    input { width: 100%; padding: 10px; margin: 5px 0; }\n"
-    "    button { width: 100%; padding: 10px; background: #007bff; color: "
-    "white; border: none; cursor: pointer; }\n"
-    "  </style>\n"
+    "<meta charset=\"utf-8\">\n"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+    "<title>AJOS - Sign in</title>\n"
+    "<style>\n"
+    "*{box-sizing:border-box;margin:0;padding:0}\n"
+    "body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a,#1e293b 55%,#155e75);font-family:-apple-system,\"Segoe UI\",Roboto,Arial,sans-serif;color:#e2e8f0;padding:24px}\n"
+    ".card{width:100%;max-width:340px;background:rgba(15,23,42,.85);border:1px solid rgba(148,163,184,.25);border-radius:16px;padding:30px 26px;text-align:center;box-shadow:0 24px 60px rgba(2,6,23,.55)}\n"
+    ".logo{width:54px;height:54px;margin:0 auto 14px;border-radius:14px;background:linear-gradient(135deg,#22d3ee,#0e7490);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:19px;color:#062a33}\n"
+    "h1{font-size:20px;color:#f1f5f9;margin-bottom:6px}\n"
+    ".sub{font-size:13px;color:#94a3b8;margin-bottom:20px}\n"
+    ".err{display:none;background:rgba(220,38,38,.14);border:1px solid rgba(248,113,113,.45);color:#fca5a5;padding:9px 11px;border-radius:9px;font-size:12.5px;margin-bottom:16px;text-align:left}\n"
+    "form{display:flex;flex-direction:column;gap:12px}\n"
+    "input{width:100%;padding:12px 13px;border-radius:10px;border:1px solid rgba(148,163,184,.3);background:rgba(2,6,23,.6);color:#f1f5f9;font-size:14px;outline:none}\n"
+    "input:focus{border-color:#22d3ee}\n"
+    "button{padding:12px;border:0;border-radius:10px;background:linear-gradient(135deg,#22d3ee,#0891b2);color:#052e36;font-weight:700;font-size:14px;cursor:pointer}\n"
+    "button:hover{filter:brightness(1.08)}\n"
+    ".ft{margin-top:18px;font-size:11px;color:#64748b}\n"
+    "</style>\n"
     "</head>\n"
     "<body>\n"
-    "  <h1>Welcome to WiFi</h1>\n"
-    "  <p>Please log in to access the internet</p>\n"
-    "  <form method=\"POST\" action=\"/auth\">\n"
-    "    <input type=\"text\" name=\"username\" placeholder=\"Username\" "
-    "required>\n"
-    "    <input type=\"password\" name=\"password\" placeholder=\"Password\" "
-    "required>\n"
-    "    <button type=\"submit\">Connect</button>\n"
-    "  </form>\n"
+    "<div class=\"card\">\n"
+    "<div class=\"logo\">AJ</div>\n"
+    "<h1>Welcome to AJOS</h1>\n"
+    "<p class=\"sub\">Sign in to continue</p>\n"
+    "<div class=\"err\" id=\"err\">Wrong username or password. Try again.</div>\n"
+    "<form method=\"POST\" action=\"/auth\">\n"
+    "<input name=\"username\" placeholder=\"Username\" autocomplete=\"username\" required>\n"
+    "<input type=\"password\" name=\"password\" placeholder=\"Password\" autocomplete=\"current-password\" required>\n"
+    "<button type=\"submit\">Sign in</button>\n"
+    "</form>\n"
+    "<p class=\"ft\">AJOS 1.0 - captive portal</p>\n"
+    "</div>\n"
+    "<script>if(location.search.indexOf(\"error=1\")>-1)document.getElementById(\"err\").style.display=\"block\";</script>\n"
     "</body>\n"
-    "</html>";
+    "</html>\n"
+"";
 
 static const char *html_success_page =
     "<!DOCTYPE html>\n"
-    "<html>\n"
+    "<html lang=\"en\">\n"
     "<head>\n"
-    "  <title>Connected</title>\n"
-    "  <style>\n"
-    "    body { font-family: Arial; text-align: center; padding: 50px; }\n"
-    "    h1 { color: #28a745; }\n"
-    "  </style>\n"
+    "<meta charset=\"utf-8\">\n"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+    "<title>Connected - AJOS</title>\n"
+    "<style>\n"
+    "*{box-sizing:border-box;margin:0;padding:0}\n"
+    "body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a,#1e293b 55%,#155e75);font-family:-apple-system,\"Segoe UI\",Roboto,Arial,sans-serif;color:#e2e8f0;padding:24px}\n"
+    ".card{width:100%;max-width:340px;background:rgba(15,23,42,.85);border:1px solid rgba(148,163,184,.25);border-radius:16px;padding:34px 26px;text-align:center;box-shadow:0 24px 60px rgba(2,6,23,.55)}\n"
+    ".ok{width:56px;height:56px;margin:0 auto 16px;border-radius:50%;background:rgba(34,197,94,.14);border:1px solid rgba(74,222,128,.5);display:flex;align-items:center;justify-content:center;font-size:26px;color:#4ade80}\n"
+    "h1{font-size:20px;color:#f1f5f9;margin-bottom:8px}\n"
+    ".sub{font-size:13px;color:#94a3b8}\n"
+    ".ft{margin-top:20px;font-size:11px;color:#64748b}\n"
+    "</style>\n"
     "</head>\n"
     "<body>\n"
-    "  <h1>You are now connected!</h1>\n"
-    "  <p>Enjoy your internet access.</p>\n"
+    "<div class=\"card\">\n"
+    "<div class=\"ok\">&#10003;</div>\n"
+    "<h1>You are connected!</h1>\n"
+    "<p class=\"sub\">Welcome online - enjoy your session.</p>\n"
+    "<p class=\"ft\">AJOS 1.0 - captive portal</p>\n"
+    "</div>\n"
     "</body>\n"
-    "</html>";
+    "</html>\n"
+"";
 
 static const char *html_not_found =
     "<!DOCTYPE html>\n"
@@ -269,7 +297,9 @@ static void http_send_page_buf(struct tcp_pcb *pcb, const char *status,
 
   tcp_send_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
   if (blen > 0)
-    tcp_send_data(pcb, (const uint8_t *)body, (uint16_t)blen);
+    /* tcp_send segments to MSS; tcp_send_data silently drops bodies that
+     * would exceed the e1000 frame limit (one un-segmented frame). */
+    tcp_send(pcb, (const uint8_t *)body, (uint16_t)blen);
   tcp_close(pcb);
 }
 
@@ -278,11 +308,31 @@ static void http_send_page(struct tcp_pcb *pcb, const char *status,
   http_send_page_buf(pcb, status, body, _strlen(body));
 }
 
-/* Serve var/www/<name> if present, else the compiled-in fallback. */
+/* Serve var/www/<name> if present, else the compiled-in fallback.
+ * Reads prefer the IDE-disk copy (/mnt/var/www/...) -- floppy reads inside
+ * the network dispatch can wedge the kernel in QEMU. */
+extern int vfs_read_file_ram(const char *path, uint8_t **out_buf,
+                             uint32_t *out_len);
 static void http_serve_web_file(struct tcp_pcb *pcb, const char *status,
                                 const char *www_name, const char *fallback) {
   uint8_t *buf = 0;
   uint32_t size = 0;
+  {
+    char mnt[96];
+    const char *pre = "/mnt/var/www/";
+    int mi = 0;
+    while (pre[mi]) { mnt[mi] = pre[mi]; mi++; }
+    int wi = 0;
+    while (www_name[wi] && mi < 90) { mnt[mi++] = www_name[wi++]; }
+    mnt[mi] = 0;
+    if (vfs_read_file_ram(mnt, &buf, &size) && buf && size > 0) {
+      http_send_page_buf(pcb, status, (const char *)buf, (int)size);
+      kfree(buf);
+      return;
+    }
+    if (buf)
+      kfree(buf);
+  }
   if (fat12_read_file_to_ram(www_name, &buf, &size)) {
     http_send_page_buf(pcb, status, (const char *)buf, (int)size);
     kfree(buf);
@@ -353,6 +403,8 @@ void http_handle_auth(struct tcp_pcb *pcb, struct http_request *req) {
   }
 }
 
+static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req);
+
 // Handle incoming HTTP connection
 void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
   struct http_request req;
@@ -386,8 +438,56 @@ void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
   } else if (req.uri[0] == '/' && req.uri[1] == 's' && req.uri[2] == 'u' &&
              req.uri[3] == 'c') {
     http_serve_success_page(pcb);
+  } else if (req.uri[0] == '/' && req.uri[1] == 'a' && req.uri[2] == 'p' &&
+             req.uri[3] == 'p' && req.uri[4] == '/') {
+    // ajlangweb: /app/<script> -> webapp/<script>.aj via the interpreter
+    http_handle_webapp(pcb, &req);
   } else {
     // For captive portal, redirect everything to login
     http_serve_login_page(pcb);
   }
+}
+
+/* ---- ajlangweb: serve /app/<script> through the AJLang interpreter ---- */
+extern int ajlang_run_webapp(const char *script_path, const char *method,
+                             const char *uri, const char *body, char *out,
+                             int outcap, char *redirect, int redcap);
+static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req)
+{
+  static char out[8192];
+  static char redirect[160];
+  const char *u = req->uri + 5; /* skip "/app/" */
+  char name[64];
+  int i = 0;
+  while (u[i] && u[i] != '?' && i < 60)
+  {
+    name[i] = u[i];
+    i++;
+  }
+  name[i] = 0;
+  if (i == 0)
+  {
+    http_serve_not_found(pcb);
+    return;
+  }
+  char script[96];
+  int si = 0;
+  const char *pre = "webapp/";
+  while (pre[si]) { script[si] = pre[si]; si++; }
+  int ni = 0;
+  while (name[ni] && si < 88) { script[si++] = name[ni++]; }
+  const char *ext = ".aj";
+  while (*ext && si < 92) { script[si++] = *ext++; }
+  script[si] = 0;
+
+  int r = ajlang_run_webapp(script,
+                            req->method == HTTP_METHOD_POST ? "POST" : "GET",
+                            req->uri, req->body, out, (int)sizeof(out),
+                            redirect, (int)sizeof(redirect));
+  if (r == -2)
+    http_send_redirect(pcb, redirect);
+  else if (r < 0)
+    http_serve_not_found(pcb);
+  else
+    http_send_page_buf(pcb, "HTTP/1.0 200 OK\r\n", out, r);
 }

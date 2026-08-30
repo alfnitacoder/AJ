@@ -8,7 +8,12 @@
 %define SYSCALL_TICKS   2   ; -> eax=ticks
 %define SYSCALL_SLEEP   3   ; ebx=ms -> eax=0
 %define SYSCALL_GETKEY  4   ; -> eax=keycode (same as kernel KEY_* values)
-%define SYSCALL_EXIT    5   ; -> does not return (only meaningful for run3)
+%define SYSCALL_EXIT    5   ; ebx=exit code -> does not return
+%define SYSCALL_GETPID  6   ; -> eax=pid
+%define SYSCALL_GETPPID 7   ; -> eax=parent pid
+%define SYSCALL_FORK    16  ; -> eax=child pid in parent, 0 in child (-1 fail)
+%define SYSCALL_EXECVE  17  ; ebx=path, ecx=argv, edx=envp -> replaces image
+%define SYSCALL_WAITPID 18  ; ebx=pid(0=any), ecx=&status -> eax=reaped pid
 
 ; Common key codes (must match kernel.c)
 %define KEY_UP      0x100

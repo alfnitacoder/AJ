@@ -1,24 +1,38 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>WiFi Login</title>
-  <style>
-    body { font-family: Arial; text-align: center; padding: 50px; }
-    h1 { color: #333; }
-    form { margin: 20px auto; max-width: 300px; }
-    input { width: 100%; padding: 10px; margin: 5px 0; }
-    button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; cursor: pointer; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AJOS &middot; Sign in</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a,#1e293b 55%,#155e75);font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#e2e8f0;padding:24px}
+.card{width:100%;max-width:340px;background:rgba(15,23,42,.85);border:1px solid rgba(148,163,184,.25);border-radius:16px;padding:30px 26px;text-align:center;box-shadow:0 24px 60px rgba(2,6,23,.55)}
+.logo{width:54px;height:54px;margin:0 auto 14px;border-radius:14px;background:linear-gradient(135deg,#22d3ee,#0e7490);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:19px;color:#062a33}
+h1{font-size:20px;color:#f1f5f9;margin-bottom:6px}
+.sub{font-size:13px;color:#94a3b8;margin-bottom:20px}
+.err{display:none;background:rgba(220,38,38,.14);border:1px solid rgba(248,113,113,.45);color:#fca5a5;padding:9px 11px;border-radius:9px;font-size:12.5px;margin-bottom:16px;text-align:left}
+form{display:flex;flex-direction:column;gap:12px}
+input{width:100%;padding:12px 13px;border-radius:10px;border:1px solid rgba(148,163,184,.3);background:rgba(2,6,23,.6);color:#f1f5f9;font-size:14px;outline:none}
+input:focus{border-color:#22d3ee}
+button{padding:12px;border:0;border-radius:10px;background:linear-gradient(135deg,#22d3ee,#0891b2);color:#052e36;font-weight:700;font-size:14px;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+.ft{margin-top:18px;font-size:11px;color:#64748b}
+</style>
 </head>
 <body>
-  <h1>Welcome to WiFi</h1>
-  <p>Please log in to access the internet</p>
-  <form method="POST" action="/auth">
-    <input type="text" name="username" placeholder="Username" required>
-    <input type="password" name="password" placeholder="Password" required>
-    <button type="submit">Connect</button>
-  </form>
+<div class="card">
+<div class="logo">AJ</div>
+<h1>Welcome to AJOS</h1>
+<p class="sub">Sign in to continue</p>
+<div class="err" id="err">Wrong username or password. Try again.</div>
+<form method="POST" action="/auth">
+<input name="username" placeholder="Username" autocomplete="username" required>
+<input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
+<button type="submit">Sign in</button>
+</form>
+<p class="ft">AJOS 1.0 &middot; captive portal</p>
+</div>
+<script>if(location.search.indexOf("error=1")>-1)document.getElementById("err").style.display="block";</script>
 </body>
 </html>
-
-<!-- served from var/www -->

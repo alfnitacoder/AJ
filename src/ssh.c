@@ -60,7 +60,18 @@ static uint8_t ssh_mac_plain_scratch[36000];
 /* SSH_MSG_CHANNEL_DATA payload build: recipient(4) + string len(4) + bytes.
  * Must not live on the stack — a ~16KB pkt[] here overflowed the kernel stack
  * after a few SSH commands (echo + shell output). */
-#define SSH_CHANNEL_DATA_CHUNK 4096
+/* Each CHANNEL_DATA chunk becomes exactly ONE SSH binary packet and ONE TCP
+ * segment (tcp_send_data does NOT segment to MSS). Frame budget: 14 Eth +
+ * 20 IP + 20 TCP + 4 len + 1 padlen + up to 15 pad + 32 MAC = 106 bytes of
+ * overhead. 1400 + 106 = 1506 < 1518 Ethernet limit. The old 4096 made any
+ * reply larger than ~1400 bytes (SFTP READDIR NAME with 16 entries, large
+ * DATA reads) produce a ~1526-byte frame that e1000 rejects with
+ * "tx_send_raw: len too big" -- all 256 send retries fail the same way, the
+ * packet is silently dropped (CTR rolled back, seq not advanced), and the
+ * OpenSSH client -- which has NO SFTP timeouts -- hangs forever on `ls`.
+ * Fragmenting the SFTP stream across several CHANNEL_DATA packets is legal;
+ * the client reassembles the length-prefixed stream. */
+#define SSH_CHANNEL_DATA_CHUNK 1400
 static uint8_t ssh_chan_payload_scratch[8 + SSH_CHANNEL_DATA_CHUNK];
 
 /*
@@ -421,6 +432,9 @@ static void ssh_send_encrypted_aes_hmac(struct ssh_connection *conn,
       sshd_tx_buffer[total_size + mi] = mac_buf[mi];
   }
 
+  log_writestring("DBG: aes-tcp send len=");
+  log_write_u32((uint32_t)(total_size + 32));
+  log_putchar('\n');
   for (int tries = 0; tries < 256; tries++)
   {
     if (tcp_send_data(conn->pcb, sshd_tx_buffer,
@@ -437,6 +451,7 @@ static void ssh_send_encrypted_aes_hmac(struct ssh_connection *conn,
   /* Roll back CTR so a failed send does not desync the cipher state. */
   for (int i = 0; i < 16; i++)
     conn->crypto.send_ctr[i] = ctr_saved[i];
+  log_writestring("DBG: tcp send FAILED after retries\n");
   log_writestring("[SSH] encrypted tcp_send failed after retries\n");
 }
 
@@ -2270,9 +2285,19 @@ static void ssh_send_channel_data_raw(struct ssh_connection *conn,
     if (conn->client_window < chunk)
       ssh_wait_client_send_window(conn, chunk);
     if (conn->client_window < chunk)
+    {
+      log_writestring("DBG: ssh tx DROP chunk chunk=");
+      log_write_u32(chunk);
+      log_putchar('\n');
       break;
+    }
 
     conn->client_window -= chunk;
+    log_writestring("DBG: ssh tx chunk=");
+    log_write_u32(chunk);
+    log_writestring(" cw=");
+    log_write_u32(conn->client_window);
+    log_putchar('\n');
 
     ssh_write_u32(ssh_chan_payload_scratch, conn->client_channel);
     ssh_write_u32(ssh_chan_payload_scratch + 4, chunk);
@@ -2760,6 +2785,9 @@ static void ssh_handle_channel_data(struct ssh_connection *conn,
 
   if (conn->sftp_active)
   {
+    log_writestring("DBG: chdata->sftp_feed n=");
+    log_write_u32((uint32_t)n);
+    log_putchar('\n');
     sftp_feed(conn, p, (uint32_t)n);
     goto channel_window_refill;
   }
@@ -3555,6 +3583,24 @@ void ssh_handle_connection_close(struct tcp_pcb *pcb)
       break;
     }
   }
+
+  /*
+   * tcp.c moves pcb to TCP_CLOSE_WAIT on FIN and explicitly waits for the
+   * app layer to call tcp_close() ("we wait for the application" per its
+   * own comment) -- this function is that app layer for SSH, but it used
+   * to never actually call it, just reset our own bookkeeping. Every SSH
+   * connection that ended via a client FIN (not a clean channel-close,
+   * not an RST) permanently burned one of TCP_MAX_PCBS, shared by the
+   * whole network stack (SSH/HTTP/DNS/DHCP), until nothing could open a
+   * new TCP connection at all -- the "needs sshd restart to recover"
+   * symptom. sshd_stop()/start() can't fix it either: by the time a
+   * connection has leaked this way, conn->pcb is already NULL below, so
+   * sshd_stop()'s own tcp_close() loop has nothing left to find. Safe to
+   * call unconditionally: tcp_close() itself no-ops on an already-CLOSED
+   * pcb (the RST and final-ACK paths that also reach this function have
+   * already set pcb->state = TCP_CLOSED before calling in).
+   */
+  tcp_close(pcb);
 
   if (conn)
   {

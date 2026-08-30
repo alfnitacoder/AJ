@@ -287,6 +287,10 @@ void ip4_init(void);
 void ip4_set_netmask(ip_addr_t mask);
 ip_addr_t ip4_get_netmask(void);
 void ip4_set_gateway(ip_addr_t gw);
+void ip4_set_netmask_ip(int iface, ip_addr_t mask);
+void ip4_set_gateway_ip(int iface, ip_addr_t gw);
+uint32_t ip4_get_if_netmask(int iface);
+uint32_t ip4_get_if_gw(int iface);
 ip_addr_t ip4_get_gateway(void);
 
 #endif

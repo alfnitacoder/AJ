@@ -5,7 +5,7 @@
 
 void e1000_probe(void);
 extern int e1000_device_count;
-extern uint8_t e1000_mac[6];
+extern uint8_t e1000_mac[2][6];
 
 int e1000_tx_send_raw(const uint8_t *frame, uint16_t len);
 int e1000_rx_poll_one(void);
@@ -22,10 +22,10 @@ void e1000_enable_interrupts(void);
 void e1000_debug_snap(uint32_t *out_ring_pack, uint32_t *out_flags_icr);
 
 // Constants
-#define MAX_E1000_DEVICES 1
+#define MAX_E1000_DEVICES 2
 #define E1000_TX_RING_SIZE 32
 #define E1000_RX_RING_SIZE 32
 
-extern uint8_t e1000_mac[6];
+extern uint8_t e1000_mac[2][6];
 
 #endif
