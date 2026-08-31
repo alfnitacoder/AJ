@@ -77,7 +77,12 @@ def needs_lfn(name: str) -> bool:
     base, _, ext = name.partition(".")
     if len(base) > 8 or len(ext) > 3:
         return True
-    return name != name.upper() or " " in name
+    # Lowercase alone no longer forces an LFN: the AJOS kernel's dir lookup
+    # is case-insensitive against the stored 8.3 name (fat.c
+    # kstreq_local_nocase), so "todo.aj" is served fine from "TODO.AJ".
+    # This halves dir-entry usage (1 entry per app instead of 2), which
+    # matters for the App Store's webapp/ directory (16 slots/cluster).
+    return " " in name
 
 
 def lfn_entries(name: str, name83: bytes) -> list[bytes]:

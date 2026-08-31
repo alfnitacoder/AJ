@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+void netcfg_add_install(const char *name, uint32_t store_ip);
+
 extern void log_writestring(const char *s);
 extern void log_write_u32(uint32_t v);
 extern void log_putchar(char c);
@@ -158,6 +160,28 @@ int netcfg_load_from_buffer(const char *buf, int len) {
           ip4_set_gateway_ip(1, gw1);
         }
       }
+      // Parse "install <name> from <ip>" - boot-time app manifest
+      else if (line_len > 8 && netcfg_strncmp(line_start, "install ", 8) == 0) {
+        const char *p = line_start + 8;
+        char nm[32];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < 31) nm[ni++] = *p++;
+        nm[ni] = 0;
+        if (ni > 0 && netcfg_strncmp(p, " from ", 6) == 0) {
+          p += 6;
+          uint32_t sip = 0;
+          uint32_t oct = 0;
+          int octs = 0, digits = 0, okip = 1;
+          for (; *p && *p != '\r' && *p != '\n'; p++) {
+            if (*p >= '0' && *p <= '9') { oct = oct * 10u + (uint32_t)(*p - '0'); digits++; if (oct > 255u) { okip = 0; break; } continue; }
+            if (*p == '.') { if (!digits || octs >= 3) { okip = 0; break; } sip = (sip << 8) | (oct & 0xFFu); oct = 0; digits = 0; octs++; continue; }
+            okip = 0; break;
+          }
+          if (okip && octs == 3 && digits) sip = (sip << 8) | (oct & 0xFFu);
+          else if (octs != 3) okip = 0;
+          if (okip) netcfg_add_install(nm, sip);
+        }
+      }
       // Parse "netmask <address>"
       else if (line_len > 8 && netcfg_strncmp(line_start, "netmask ", 8) == 0) {
         uint32_t netmask;
@@ -216,3 +240,55 @@ int netcfg_load_from_buffer(const char *buf, int len) {
 
   return has_static_ip ? 1 : 0;
 }
+
+
+/* ---- Boot-time app manifest ("install <name> from <ip>") ---- */
+#define NETCFG_INSTALL_MAX 4
+typedef struct {
+  int used;
+  char name[32];
+  uint32_t store_ip;
+} netcfg_install_t;
+static netcfg_install_t netcfg_installs[NETCFG_INSTALL_MAX];
+
+void netcfg_add_install(const char *name, uint32_t store_ip)
+{
+  for (int i = 0; i < NETCFG_INSTALL_MAX; i++)
+  {
+    if (netcfg_installs[i].used && netcfg_strncmp(netcfg_installs[i].name, name, 31) == 0)
+      return; /* already listed */
+  }
+  for (int i = 0; i < NETCFG_INSTALL_MAX; i++)
+  {
+    if (!netcfg_installs[i].used)
+    {
+      netcfg_installs[i].used = 1;
+      int j = 0;
+      while (name[j] && j < 31) { netcfg_installs[i].name[j] = name[j]; j++; }
+      netcfg_installs[i].name[j] = 0;
+      netcfg_installs[i].store_ip = store_ip;
+      return;
+    }
+  }
+}
+
+int netcfg_get_install(int idx, char *name_out, uint32_t *ip_out)
+{
+  int seen = 0;
+  for (int i = 0; i < NETCFG_INSTALL_MAX; i++)
+  {
+    if (!netcfg_installs[i].used)
+      continue;
+    if (seen++ == idx)
+    {
+      int j = 0;
+      while (netcfg_installs[i].name[j]) { name_out[j] = netcfg_installs[i].name[j]; j++; }
+      name_out[j] = 0;
+      *ip_out = netcfg_installs[i].store_ip;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int netcfg_strncmp(const char *a, const char *b, int n);

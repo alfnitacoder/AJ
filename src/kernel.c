@@ -3012,6 +3012,8 @@ static const char *shell_commands[] = {"service",
                                        "http_stat",
                                        "http_test",
                                        "browser",
+                                       "appinstall",
+                                       "appinstall",
                                        "edit",
                                        "ticks",
                                        "uptime",
@@ -6490,6 +6492,291 @@ static void cmd_httpd(const char *arg)
   }
 }
 
+/* Fetch /raw/<name> from a store and install into the RAM registry.
+ * Returns 0 on success, negative on failure. Used by the `appinstall`
+ * shell command and by the boot-time `install <name> from <ip>` config. */
+int appinstall_fetch(uint32_t ip, uint16_t port, const char *name)
+{
+  static char appbuf[20481];
+  extern struct tcp_pcb *tcp_get_free_pcb(void);
+  extern int tcp_connect(struct tcp_pcb *pcb, uint32_t remote_ip, uint16_t port);
+  extern int tcp_send(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len);
+  extern int tcp_close(struct tcp_pcb *pcb);
+  extern int http_parse_response(const uint8_t *resp, uint16_t len,
+                                 uint16_t *status, uint16_t *hdr_end,
+                                 uint32_t *content_length);
+  extern void cmd_net_wait_ms(uint32_t ms);
+
+  struct tcp_pcb *pcb = tcp_get_free_pcb();
+  if (!pcb)
+    return -1;
+  int connected = 0;
+  for (int attempt = 0; attempt < 2 && !connected; attempt++)
+  {
+    tcp_connect(pcb, ip, port);
+    uint32_t start = pit_ticks;
+    int rounds = 0;
+    while ((pit_ticks - start) < (PIT_HZ * 6u) && rounds++ < 120)
+    {
+      if (pcb->state == TCP_ESTABLISHED)
+      {
+        connected = 1;
+        break;
+      }
+      if (pcb->state == TCP_CLOSED)
+        break;
+      cmd_net_wait_ms(50);
+    }
+    if (!connected)
+    {
+      pcb->state = TCP_CLOSED;
+      cmd_net_wait_ms(100);
+    }
+  }
+  if (!connected)
+    return -2;
+
+  pcb->app_rx_len = 0;
+  char req[256];
+  int n = 0;
+  const char *p1 = "GET /raw/";
+  for (int i = 0; p1[i] && n < 255; i++) req[n++] = p1[i];
+  for (int i = 0; name[i] && n < 255; i++) req[n++] = name[i];
+  const char *p2 = " HTTP/1.0\r\nHost: store\r\n\r\n";
+  for (int i = 0; p2[i] && n < 255; i++) req[n++] = p2[i];
+  req[n] = 0;
+  tcp_send(pcb, (const uint8_t *)req, (uint16_t)n);
+
+  uint32_t start = pit_ticks;
+  int got_hdr = 0;
+  while ((pit_ticks - start) < (PIT_HZ * 20u))
+  {
+    cmd_net_wait_ms(50);
+    uint32_t have = pcb->app_rx_len;
+    if (have > 4)
+    {
+      for (uint32_t i = 0; i + 7 < have; i++)
+      {
+        if (pcb->app_rx_buf[i] == '\r' && pcb->app_rx_buf[i + 1] == '\n' &&
+            pcb->app_rx_buf[i + 2] == '\r' && pcb->app_rx_buf[i + 3] == '\n')
+        {
+          got_hdr = 1;
+          break;
+        }
+      }
+      uint16_t sc = 0;
+      uint16_t he = 0;
+      uint32_t cl = 0;
+      if (got_hdr && http_parse_response(pcb->app_rx_buf, pcb->app_rx_len, &sc, &he, &cl))
+      {
+        if ((cl != 0 && (uint32_t)have >= (uint32_t)he + cl) ||
+            pcb->state == TCP_CLOSE_WAIT || pcb->state == TCP_CLOSED)
+          break;
+      }
+    }
+  }
+
+  uint16_t status_code = 0;
+  uint16_t header_end = 0;
+  uint32_t content_length = 0;
+  if (pcb->app_rx_len == 0 ||
+      !http_parse_response(pcb->app_rx_buf, pcb->app_rx_len, &status_code,
+                           &header_end, &content_length))
+  {
+    tcp_close(pcb);
+    return -3;
+  }
+  if (status_code != 200)
+  {
+    tcp_close(pcb);
+    return -4;
+  }
+
+  uint32_t blen = (uint32_t)pcb->app_rx_len - (uint32_t)header_end;
+  if (blen > 20480u)
+    blen = 20480u;
+  for (uint32_t i = 0; i < blen; i++)
+    appbuf[i] = (char)pcb->app_rx_buf[header_end + i];
+  appbuf[blen] = 0;
+  tcp_close(pcb);
+
+  /* Sanity: reject HTML (an error page) instead of a script */
+  for (int i = 0; i < 64 && appbuf[i]; i++)
+  {
+    if (appbuf[i] == '<' && (appbuf[i + 1] == 'h' || appbuf[i + 1] == 'H'))
+      return -5;
+  }
+
+  extern int webreg_install(const char *name, const char *text, int len);
+  if (webreg_install(name, appbuf, (int)blen) < 0)
+    return -6;
+  return 0;
+}
+
+/* appinstall <ip[:port]> <name> - fetch an app from an AJOS App Store
+ * (GET /raw/<name>) and install it into the RAM webapp registry.
+ * The app is served at /app/<name> immediately, until reboot. */
+static void cmd_appinstall(const char *args)
+{
+  const char *s = skip_spaces(args);
+  if (!*s)
+  {
+    log_writestring("Usage: appinstall <store-ip[:port]> <appname>\n");
+    log_writestring("  e.g. appinstall 203.191.130.131 editor\n");
+    log_writestring("  Lists: appinstall list | appinstall remove <name>\n");
+    return;
+  }
+
+  extern int webreg_count(void);
+  extern int webreg_list(char *buf, int cap);
+  extern int webreg_remove(const char *name);
+
+  /* Subcommands */
+  if (s[0] == 'l' && s[1] == 'i' && s[2] == 's' && s[3] == 't')
+  {
+    char buf[256];
+    webreg_list(buf, (int)sizeof(buf));
+    log_writestring("Installed apps (");
+    log_write_u32((uint32_t)webreg_count());
+    log_writestring("/8):\n");
+    log_writestring(buf);
+    return;
+  }
+  if (s[0] == 'r' && s[1] == 'e' && s[2] == 'm' && s[3] == 'o' && s[4] == 'v' && s[5] == 'e')
+  {
+    const char *nm = skip_spaces(s + 6);
+    if (webreg_remove(nm))
+      log_writestring("Removed.\n");
+    else
+      log_writestring("Not found.\n");
+    return;
+  }
+
+  /* Parse <ip[:port]> */
+  char host[40];
+  int hi = 0;
+  while (*s && *s != ' ' && *s != '\r' && *s != '\n' && hi < 39)
+    host[hi++] = *s++;
+  host[hi] = 0;
+  while (*s == ' ')
+    s++;
+  if (!*s)
+  {
+    log_writestring("appinstall: missing app name\n");
+    return;
+  }
+  char name[32];
+  int ni = 0;
+  while (s[ni] && s[ni] != ' ' && s[ni] != '\r' && s[ni] != '\n' && ni < 31)
+    name[ni] = s[ni++];
+  name[ni] = 0;
+
+  uint32_t ip = 0;
+  uint16_t port = 80;
+  {
+    uint32_t octet = 0;
+    int octets = 0;
+    int digits = 0;
+    for (int i = 0; host[i]; i++)
+    {
+      if (host[i] >= '0' && host[i] <= '9')
+      {
+        octet = octet * 10u + (uint32_t)(host[i] - '0');
+        digits++;
+        if (octet > 255u)
+        {
+          log_writestring("appinstall: bad IP\n");
+          return;
+        }
+        continue;
+      }
+      if (host[i] == '.')
+      {
+        if (!digits || octets >= 3)
+        {
+          log_writestring("appinstall: bad IP\n");
+          return;
+        }
+        ip = (ip << 8) | (octet & 0xFFu);
+        octet = 0;
+        digits = 0;
+        octets++;
+        continue;
+      }
+      if (host[i] == ':')
+      {
+        if (octets != 3 || !digits)
+        {
+          log_writestring("appinstall: bad IP\n");
+          return;
+        }
+        ip = (ip << 8) | (octet & 0xFFu);
+        octets++;
+        uint32_t pv = 0;
+        int j = i + 1, d2 = 0;
+        for (; host[j]; j++)
+        {
+          if (host[j] < '0' || host[j] > '9')
+          {
+            log_writestring("appinstall: bad port\n");
+            return;
+          }
+          pv = pv * 10u + (uint32_t)(host[j] - '0');
+          d2++;
+          if (pv > 65535u)
+          {
+            log_writestring("appinstall: bad port\n");
+            return;
+          }
+        }
+        if (!d2)
+        {
+          log_writestring("appinstall: bad port\n");
+          return;
+        }
+        port = (uint16_t)pv;
+        octets = 4; /* done */
+        break;
+      }
+      log_writestring("appinstall: bad IP\n");
+      return;
+    }
+    if (octets == 3 && digits)
+      ip = (ip << 8) | (octet & 0xFFu);
+    else if (octets != 4)
+    {
+      log_writestring("appinstall: bad IP\n");
+      return;
+    }
+  }
+
+  extern int tcp_parse_ip_str(const char *s);
+  (void)tcp_parse_ip_str;
+
+  log_writestring("appinstall: fetching /raw/");
+  log_writestring(name);
+  log_writestring(" from store...\n");
+  int r = appinstall_fetch(ip, port, name);
+  if (r == 0)
+  {
+    log_writestring("Installed '");
+    log_writestring(name);
+    log_writestring("'. Live now at /app/");
+    log_writestring(name);
+    log_writestring(" (until reboot)\n");
+  }
+  else if (r == -2)
+    log_writestring("appinstall: connect timeout\n");
+  else if (r == -3)
+    log_writestring("appinstall: bad response from store\n");
+  else if (r == -4)
+    log_writestring("appinstall: store returned an error\n");
+  else if (r == -5)
+    log_writestring("appinstall: got HTML, not an app script\n");
+  else
+    log_writestring("appinstall: registry full or bad app\n");
+}
+
 static void cmd_http_get(const char *args)
 {
   const char *s = skip_spaces(args);
@@ -7971,6 +8258,53 @@ int vfs_read_file_ram(const char *path, uint8_t **out_buf, uint32_t *out_len)
 
 static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err);
 
+/* Run a webapp from a RAM buffer (the App Store client registry path).
+ * Splits uri into path + query, splices imports, runs the interpreter. */
+int ajlang_run_webapp_buf(const char *text, uint32_t slen,
+                          const char *method, const char *uri,
+                          const char *body, char *out, int outcap,
+                          char *redirect, int redcap)
+{
+  static int webapp_busy = 0;
+  if (webapp_busy)
+    return -1;
+  webapp_busy = 1;
+
+  /* Split uri into path + query at the first '?' */
+  char upath[128];
+  const char *uquery = "";
+  int ui = 0;
+  while (uri[ui] && uri[ui] != '?' && ui < 127)
+  {
+    upath[ui] = uri[ui];
+    ui++;
+  }
+  upath[ui] = 0;
+  if (uri[ui] == '?')
+    uquery = uri + ui + 1;
+
+  int err = 0;
+  uint8_t *combined = ajlang_splice_imports((uint8_t *)text, slen, &err);
+
+  webreq_begin(method, upath, uquery, body ? body : "");
+  ajlang_capture_begin(out, outcap);
+  ajlang_run((const char *)(combined ? combined : (const uint8_t *)text));
+  int olen = ajlang_capture_len();
+  webreq_end();
+
+  if (combined)
+    kfree(combined);
+
+  if (webreq_take_redirect(redirect, redcap))
+  {
+    webapp_busy = 0;
+    return -2;
+  }
+  webapp_busy = 0;
+  return olen;
+}
+
+/* File-backed webapp: read from IDE copy or boot FAT, run the buffer. */
 int ajlang_run_webapp(const char *script_path, const char *method,
                       const char *uri, const char *body, char *out,
                       int outcap, char *redirect, int redcap)
@@ -7978,7 +8312,6 @@ int ajlang_run_webapp(const char *script_path, const char *method,
   static int webapp_busy = 0;
   if (webapp_busy)
     return -1;
-  webapp_busy = 1;
 
   uint8_t *src = 0;
   uint32_t slen = 0;
@@ -8001,44 +8334,12 @@ int ajlang_run_webapp(const char *script_path, const char *method,
       ok = fat12_read_file_to_ram(script_path, &src, &slen);
   }
   if (!ok || !src || slen == 0)
-  {
-    webapp_busy = 0;
     return -1;
-  }
 
-  /* Split uri into path + query at the first '?' */
-  char upath[128];
-  const char *uquery = "";
-  int ui = 0;
-  while (uri[ui] && uri[ui] != '?' && ui < 127)
-  {
-    upath[ui] = uri[ui];
-    ui++;
-  }
-  upath[ui] = 0;
-  if (uri[ui] == '?')
-    uquery = uri + ui + 1;
-
-  int err = 0;
-  uint8_t *combined = ajlang_splice_imports(src, slen, &err);
-
-  webreq_begin(method, upath, uquery, body ? body : "");
-  ajlang_capture_begin(out, outcap);
-  ajlang_run((const char *)(combined ? combined : src));
-  int olen = ajlang_capture_len();
-  webreq_end();
-
-  if (combined)
-    kfree(combined);
+  int r = ajlang_run_webapp_buf((const char *)src, slen, method, uri, body,
+                                out, outcap, redirect, redcap);
   kfree(src);
-
-  if (webreq_take_redirect(redirect, redcap))
-  {
-    webapp_busy = 0;
-    return -2;
-  }
-  webapp_busy = 0;
-  return olen;
+  return r;
 }
 
 static uint8_t *ajlang_splice_imports(uint8_t *src, uint32_t src_len, int *err)
@@ -9133,7 +9434,11 @@ static void shell_dispatch(const char *line)
     cmd_rm(rest);
     return;
   }
-  if (cmd_clean_len == 7 && kstrcmp_n(cmd_clean, "browser", 7) == 0)
+  if (cmd_clean_len == 10 && kstrcmp_n(cmd_clean, "appinstall", 10) == 0)
+  {
+    cmd_appinstall(rest);
+  }
+  else   if (cmd_clean_len == 7 && kstrcmp_n(cmd_clean, "browser", 7) == 0)
   {
     extern void cmd_browser(const char *arg);
     cmd_browser(rest);
@@ -9696,6 +10001,41 @@ void kernel_main()
 
   log_writestring("Configuring network...\n");
   network_auto_setup();
+
+  /* Boot-time App Store manifest: "install <name> from <store-ip>" lines in
+   * /etc/NETWORK.CFG pull apps from a store server right after the network
+   * is up. Apps land in the RAM registry and serve at /app/<name>. */
+  {
+    extern int appinstall_fetch(uint32_t ip, uint16_t port, const char *name);
+    extern int netcfg_get_install(int idx, char *name_out, uint32_t *ip_out);
+    char iname[32];
+    uint32_t istore = 0;
+    for (int ii = 0; ii < 4; ii++)
+    {
+      if (!netcfg_get_install(ii, iname, &istore))
+        break;
+      log_writestring("[Store] installing '");
+      log_writestring(iname);
+      log_writestring("' from store...\n");
+      int r = appinstall_fetch(istore, 80, iname);
+      if (r == 0)
+      {
+        log_writestring("[Store] installed '");
+        log_writestring(iname);
+        log_writestring("' -> /app/");
+        log_writestring(iname);
+        log_putchar('\n');
+      }
+      else
+      {
+        log_writestring("[Store] install of '");
+        log_writestring(iname);
+        log_writestring("' failed (code ");
+        log_write_u32((uint32_t)(-r));
+        log_writestring(")\n");
+      }
+    }
+  }
   outb(0x3F8, (uint8_t)'N'); /* Network setup done */
 
   /* Listen on :22 after FS + static IP are up so an external agent can SSH/SFTP

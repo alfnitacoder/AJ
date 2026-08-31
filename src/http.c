@@ -404,6 +404,7 @@ void http_handle_auth(struct tcp_pcb *pcb, struct http_request *req) {
 }
 
 static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req);
+static void http_handle_raw_app(struct tcp_pcb *pcb, struct http_request *req);
 
 // Handle incoming HTTP connection
 void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
@@ -438,6 +439,11 @@ void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
   } else if (req.uri[0] == '/' && req.uri[1] == 's' && req.uri[2] == 'u' &&
              req.uri[3] == 'c') {
     http_serve_success_page(pcb);
+  } else if (req.uri[0] == '/' && req.uri[1] == 'r' && req.uri[2] == 'a' &&
+             req.uri[3] == 'w' && req.uri[4] == '/') {
+    // App Store: serve the raw webapp script so other AJOS boxes can
+    // `appinstall` it: GET /raw/<name> -> webapp/<name>.aj (text/plain)
+    http_handle_raw_app(pcb, &req);
   } else if (req.uri[0] == '/' && req.uri[1] == 'a' && req.uri[2] == 'p' &&
              req.uri[3] == 'p' && req.uri[4] == '/') {
     // ajlangweb: /app/<script> -> webapp/<script>.aj via the interpreter
@@ -452,6 +458,125 @@ void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
 extern int ajlang_run_webapp(const char *script_path, const char *method,
                              const char *uri, const char *body, char *out,
                              int outcap, char *redirect, int redcap);
+/* App Store: GET /raw/<name> -> serve webapp/<name>.aj as text/plain so a
+ * remote AJOS box can install it with `appinstall <ip> <name>`. */
+static void http_handle_raw_app(struct tcp_pcb *pcb, struct http_request *req)
+{
+  static uint8_t rawbuf[16384];
+  const char *u = req->uri + 5; /* skip "/raw/" */
+  char name[64];
+  int i = 0;
+  while (u[i] && u[i] != '?' && i < 60)
+  {
+    char c = u[i];
+    if (c == '/' || c == '\\')
+    {
+      http_serve_not_found(pcb);
+      return;
+    }
+    name[i] = c;
+    i++;
+  }
+  name[i] = 0;
+  if (i == 0)
+  {
+    http_serve_not_found(pcb);
+    return;
+  }
+
+  /* First check the RAM registry (apps installed at runtime are shareable) */
+  {
+    extern int webreg_lookup(const char *name, const char **out_text, int *out_len);
+    const char *text = 0;
+    int tlen = 0;
+    if (webreg_lookup(name, &text, &tlen) && text && tlen > 0)
+    {
+      static char hdr[96];
+      char *h = hdr;
+      const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+      for (int k = 0; h1[k]; k++) *h++ = h1[k];
+      /* length */
+      char lenbuf[12];
+      int lb = 0;
+      if (tlen == 0) lenbuf[lb++] = '0';
+      {
+        int v = tlen;
+        char tmp[10];
+        int tn = 0;
+        while (v > 0) { tmp[tn++] = (char)('0' + (v % 10)); v /= 10; }
+        while (tn > 0) lenbuf[lb++] = tmp[--tn];
+      }
+      for (int k = 0; k < lb; k++) *h++ = lenbuf[k];
+      const char *h2 = "\r\n\r\n";
+      for (int k = 0; h2[k]; k++) *h++ = h2[k];
+      *h = 0;
+      http_send_page_buf(pcb, hdr, text, tlen);
+      return;
+    }
+  }
+
+  char script[96];
+  int si = 0;
+  const char *pre = "webapp/";
+  while (pre[si]) { script[si] = pre[si]; si++; }
+  int q = 0;
+  while (name[q] && si < 92) { script[si++] = name[q++]; }
+  const char *ext = ".aj";
+  while (*ext && si < 92) { script[si++] = *ext++; }
+  script[si] = 0;
+
+  extern int vfs_read_file_ram(const char *path, uint8_t **out_buf, uint32_t *out_len);
+  extern int fat12_read_file_to_ram(const char *path, uint8_t **out_buf, uint32_t *out_len);
+  uint8_t *buf = 0;
+  uint32_t blen = 0;
+  int ok = 0;
+  {
+    char mnt_path[128];
+    int mi = 0;
+    const char *mntpre = "/mnt/";
+    while (mntpre[mi]) { mnt_path[mi] = mntpre[mi]; mi++; }
+    int wi = 0;
+    while (script[wi] && mi < 126) { mnt_path[mi++] = script[wi++]; }
+    mnt_path[mi] = 0;
+    if (vfs_read_file_ram(mnt_path, &buf, &blen))
+      ok = 1;
+    else if (fat12_read_file_to_ram(script, &buf, &blen))
+      ok = 1;
+  }
+  if (!ok || !buf || blen == 0 || blen > sizeof(rawbuf))
+  {
+    http_serve_not_found(pcb);
+    if (buf)
+      kfree(buf);
+    return;
+  }
+  for (uint32_t k = 0; k < blen; k++)
+    rawbuf[k] = buf[k];
+  kfree(buf);
+
+  static char hdr[96];
+  {
+    char *h = hdr;
+    const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+    for (int k = 0; h1[k]; k++) *h++ = h1[k];
+    char lenbuf[12];
+    int lb = 0;
+    if (blen == 0) lenbuf[lb++] = '0';
+    {
+      uint32_t v = blen;
+      char tmp[10];
+      int tn = 0;
+      while (v > 0) { tmp[tn++] = (char)('0' + (v % 10u)); v /= 10u; }
+      while (tn > 0) lenbuf[lb++] = tmp[--tn];
+    }
+    for (int k = 0; k < lb; k++) *h++ = lenbuf[k];
+    const char *h2 = "\r\n\r\n";
+    for (int k = 0; h2[k]; k++) *h++ = h2[k];
+    *h = 0;
+  }
+  http_send_page_buf(pcb, hdr, (const char *)rawbuf, (int)blen);
+}
+
 static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req)
 {
   static char out[8192];
@@ -470,6 +595,32 @@ static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req)
     http_serve_not_found(pcb);
     return;
   }
+
+  /* RAM registry (App Store installs) takes precedence over the boot image */
+  {
+    extern int webreg_lookup(const char *name, const char **out_text, int *out_len);
+    extern int ajlang_run_webapp_buf(const char *text, uint32_t slen,
+                                     const char *method, const char *uri,
+                                     const char *body, char *out, int outcap,
+                                     char *redirect, int redcap);
+    const char *text = 0;
+    int tlen = 0;
+    if (webreg_lookup(name, &text, &tlen) && text && tlen > 0)
+    {
+      int rb = ajlang_run_webapp_buf(text, (uint32_t)tlen,
+                                     req->method == HTTP_METHOD_POST ? "POST" : "GET",
+                                     req->uri, req->body, out, (int)sizeof(out),
+                                     redirect, (int)sizeof(redirect));
+      if (rb == -2)
+        http_send_redirect(pcb, redirect);
+      else if (rb < 0)
+        http_serve_not_found(pcb);
+      else
+        http_send_page_buf(pcb, "HTTP/1.0 200 OK\r\n", out, rb);
+      return;
+    }
+  }
+
   char script[96];
   int si = 0;
   const char *pre = "webapp/";

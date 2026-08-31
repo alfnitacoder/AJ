@@ -52,8 +52,10 @@ if st__pg == "publish" then
   print "<p>The HTTP server maps <code>/app/&lt;name&gt;</code> to <code>webapp/&lt;name&gt;.aj</code> in the boot image.</p>"
   print "<h2>3. Bake + install</h2>"
   print "<pre># rebuild the boot image with your app staged\npython3 tools/mkfat12.py build/ajos.img --boot build/boot.bin --kernel build/kernel.bin\n# flash it to the primary disk from the AJOS shell\ninstalldisk</pre>"
-  print "<h2>4. Share it</h2>"
-  print "<p>Post your app in the <a href=\"/app/index\" style=\"color:#67e8f9\">guestbook</a> and the community can grab the recipe. No package manager, no manifest, no dependency hell - one file, one route.</p>"
+  print "<h2>4. Push it to the store</h2>"
+  print "<p>Commit your <code>webapp/&lt;name&gt;.aj</code> and run <code>tools/deploy-store.sh</code> - the store redeploys with your app baked in and installable by every AJOS server:</p>"
+  print "<pre>appinstall 203.191.130.131 &lt;yourapp&gt;</pre>"
+  print "<p>No package manager, no manifest, no dependency hell - one file, one route, one command.</p>"
   print "</div>"
 else
   print "<div class=\"hero\"><h1>AJOS <b>App Store</b></h1>"
@@ -63,19 +65,34 @@ else
   print "<h2>Featured</h2>"
   print "<div class=\"cards\">"
 
-  print "<div class=\"c\"><h3>📓 Guestbook</h3><p>The classic first app. Sign your name, read the wall. Proves the db package over the FAT filesystem works.</p>"
-  print "<span class=\"pill\">installed</span><span class=\"pill\">db</span><br><a class=\"btn\" href=\"/app/index\">Open</a></div>"
+  print "<div class=\"c\"><h3>📓 Guestbook</h3><p>The classic first app. Sign your name, read the wall.</p>"
+  print "<span class=\"pill\">db</span><br><a class=\"btn\" href=\"/app/index\">Open</a>"
+  print "<pre style=\"margin-top:8px\">appinstall 203.191.130.131 index</pre></div>"
 
-  print "<div class=\"c\"><h3>✅ TODO</h3><p>A persistent todo list served straight from the kernel's interpreter. Add, complete, repeat.</p>"
-  print "<span class=\"pill\">installed</span><span class=\"pill\">db</span><br><a class=\"btn\" href=\"/app/todo\">Open</a></div>"
+  print "<div class=\"c\"><h3>✅ TODO</h3><p>A persistent todo list served straight from the kernel's interpreter.</p>"
+  print "<span class=\"pill\">db</span><br><a class=\"btn\" href=\"/app/todo\">Open</a>"
+  print "<pre style=\"margin-top:8px\">appinstall 203.191.130.131 todo</pre></div>"
+
+  print "<div class=\"c\"><h3>📝 Editor</h3><p>An in-browser scratchpad. Write, save, reload - stored in the kernel's RAM db.</p>"
+  print "<span class=\"pill\">db</span><br><a class=\"btn\" href=\"/app/editor\">Open</a>"
+  print "<pre style=\"margin-top:8px\">appinstall 203.191.130.131 editor</pre></div>"
+
+  print "<div class=\"c\"><h3>📶 Hotspot portal</h3><p>A captive-portal landing page: terms, connect, welcome. Drop-in splash for any hotspot box.</p>"
+  print "<span class=\"pill\">portal</span><br><a class=\"btn\" href=\"/app/hotspot\">Open</a>"
+  print "<pre style=\"margin-top:8px\">appinstall 203.191.130.131 hotspot</pre></div>"
 
   print "<div class=\"c\"><h3>🌐 buildwithAJ portal</h3><p>The official AJOS.dev developer site: docs, the AJLang tour, and the kernel story. 17 pages, one script.</p>"
-  print "<span class=\"pill\">installed</span><span class=\"pill\">docs</span><br><a class=\"btn\" href=\"/app/buildwithaj\">Open</a></div>"
+  print "<span class=\"pill\">docs</span><br><a class=\"btn\" href=\"/app/buildwithaj\">Open</a></div>"
 
   print "<div class=\"c\"><h3>🛍️ App Store</h3><p>This page. The catalog lives on its own AJOS server - because the store should run on the platform it sells for.</p>"
-  print "<span class=\"pill\">installed</span><span class=\"pill\">you are here</span></div>"
+  print "<span class=\"pill\">you are here</span></div>"
 
   print "</div>"
+
+  print "<h2>Install an app on YOUR server</h2>"
+  print "<p>Any AJOS box with the App Store client (kernel with <code>appinstall</code>) can install straight from this catalog. On your server's shell:</p>"
+  print "<pre>appinstall 203.191.130.131 editor   &lt;- fetch + install, live at /app/editor\nappinstall list                     &lt;- what's installed\nappinstall remove editor            &lt;- uninstall</pre>"
+  print "<p>Installs live in RAM: instant, no reboot, gone at reboot (re-run to restore). The kernel fetches the script from this server's <code>/raw/&lt;name&gt;</code> endpoint.</p>"
 
   print "<h2>Why an app store for a hobby OS?</h2>"
   print "<p>Because \"you can build things\" only counts when people can <i>find</i> them. The store is a live demo of the whole stack: a 4MB kernel, ATA disks, the e1000 NIC driver, TCP/IP, an HTTP server, and an interpreter - serving a catalog page over the real internet.</p>"
