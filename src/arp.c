@@ -223,6 +223,17 @@ void arp_get_ajos_mac(uint8_t *mac) {
 }
 
 int arp_get_mac_for_ip(uint32_t ip, eth_addr_t *out_mac) {
+  /* IP broadcast destinations map straight to the Ethernet broadcast MAC.
+   * Without this, broadcast-bound packets (DHCP offers!) queue behind an
+   * ARP request for 255.255.255.255 that can never resolve, leaking pbufs
+   * and pinning the CPU in the pending scan. */
+  if (ip == 0xFFFFFFFFu || (ip & 0xFF000000u) == 0xFF000000u) {
+    if (out_mac) {
+      for (int b = 0; b < 6; b++)
+        out_mac->addr[b] = 0xFFu;
+    }
+    return 1;
+  }
   for (int i = 0; i < ARP_CACHE_SIZE; i++) {
     if (arp_cache[i].valid && arp_cache[i].ip == ip) {
       if (out_mac) {

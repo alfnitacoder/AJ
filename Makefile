@@ -46,9 +46,6 @@ CRYPTO_SRC = $(SRC_DIR)/crypto.c
 RAMFS_SRC = $(SRC_DIR)/ramfs.c
 VFS_SRC = $(SRC_DIR)/vfs.c
 AJLANG_SRC = $(SRC_DIR)/ajlang.c
-LLM_SRC = $(SRC_DIR)/llm.c
-LLM_MATH_SRC = $(SRC_DIR)/llm_math.c
-LLM_INFERENCE_SRC = $(SRC_DIR)/llm_inference.c
 
 # OpenSSH sources
 OPENSSH_SRC = $(SRC_DIR)/openssh/sshbuf.c \
@@ -101,7 +98,6 @@ CRYPTO_OBJ = $(BUILD_DIR)/crypto.o
 RAMFS_OBJ = $(BUILD_DIR)/ramfs.o
 VFS_OBJ = $(BUILD_DIR)/vfs.o
 AJLANG_OBJ = $(BUILD_DIR)/ajlang.o
-LLM_OBJ = $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
 DEMO_BIN = $(BUILD_DIR)/demo.bin
 FORKDEMO_BIN = $(BUILD_DIR)/FORKDEMO.BIN
 CHILD_BIN = $(BUILD_DIR)/CHILD.BIN
@@ -292,15 +288,6 @@ $(VFS_OBJ): $(VFS_SRC)
 $(AJLANG_OBJ): $(AJLANG_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/llm.o: $(LLM_SRC)
-	$(CC) $(LLM_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/llm_math.o: $(LLM_MATH_SRC)
-	$(CC) $(LLM_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/llm_inference.o: $(LLM_INFERENCE_SRC)
-	$(CC) $(LLM_CFLAGS) -c $< -o $@
-
 # OpenSSH objects
 $(BUILD_DIR)/openssh_sshbuf.o: $(SRC_DIR)/openssh/sshbuf.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -318,7 +305,6 @@ $(BUILD_DIR)/openssh_ssherr.o: $(SRC_DIR)/openssh/ssherr.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-# LLM (llm.o llm_math.o llm_inference.o) temporarily not linked — re-add $(LLM_OBJ) to restore.
 $(KERNEL_ELF): $(ISR_OBJ) $(BIOS_OBJ) $(GDT_OBJ) $(USER_MODE_OBJ) $(KERNEL_ENTRY_OBJ) $(KERNEL_OBJ) $(NETDEV_OBJ) $(MM_OBJ) $(PBUF_OBJ) $(ETH_OBJ) $(ARP_OBJ) $(IP4_OBJ) $(ICMP_OBJ) $(UDP_OBJ) $(TCP_OBJ) $(DHCP_OBJ) $(DNS_OBJ) $(NETCFG_OBJ) $(HTTP_OBJ) $(SSH_OBJ) $(SFTP_OBJ) $(DHCPD_OBJ) $(DNSD_OBJ) $(AUTH_OBJ) $(USER_OBJ) $(BROWSER_OBJ) $(TLS_OBJ) $(EDITOR_OBJ) $(WEBREG_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(RAMFS_OBJ) $(VFS_OBJ) $(AJLANG_OBJ) $(OPENSSH_OBJ) | kernel/linker.ld
 	@echo "Linking kernel.elf (may take 30-60s)..."
 	$(LD) $(LDFLAGS) -o $@ $^
@@ -510,7 +496,7 @@ install-qemu-mac:
 	@echo "Done. Run: make run-console"
 
 force-clean-serial:
-	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(SFTP_OBJ) $(AJLANG_OBJ) $(BUILD_DIR)/llm.o $(BUILD_DIR)/llm_math.o $(BUILD_DIR)/llm_inference.o
+	rm -f $(KERNEL_OBJ) $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/fat.o $(EDITOR_OBJ) $(VIDEO_OBJ) $(MOUSE_OBJ) $(CRYPTO_OBJ) $(SSH_OBJ) $(SFTP_OBJ) $(AJLANG_OBJ)
 
 # Standard targets should also clean potentially serial-polluted objects
 force-clean-standard:

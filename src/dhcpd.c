@@ -245,6 +245,14 @@ void dhcpd_handle_packet(struct pbuf *p) {
   }
 
   if (type == DHCP_DISCOVER) {
+    /* Only serve the primary interface (the pool's subnet). With dual-NIC
+     * the second NIC faces the management LAN: answering its DHCP clients
+     * with DMZ-pool offers breaks their DHCP and floods our pending-ARP
+     * queue (the CPU-storm fix). */
+    extern int e1000_active_rx_device;
+    if (e1000_active_rx_device != 0) {
+      return;
+    }
     log_writestring("[DHCPD] Received DISCOVER from ");
     log_write_hex32(pkt->chaddr[5]); // Just last byte
     log_putchar('\n');
