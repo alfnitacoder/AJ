@@ -31,6 +31,7 @@ extern uint32_t ip4_get_netmask(void);
 extern uint32_t ip4_get_gateway(void);
 
 #define TCP_RTX_TIMEOUT_TICKS 100u // ~1s at PIT_HZ=100
+#define PIT_HZ 100u
 #define TCP_RTX_MAX 3
 
 #define TCP_LOCAL_RECV_WINDOW 32768u
@@ -45,6 +46,7 @@ void tcp_init(void) {
     tcp_pcbs[i].last_tx_len = 0;
     tcp_pcbs[i].app_rx_len = 0;
     tcp_pcbs[i].peer_wnd = 65535u;
+    tcp_pcbs[i].state_tick = 0;
   }
 }
 
@@ -52,6 +54,29 @@ struct tcp_pcb *tcp_get_free_pcb(void) {
   for (int i = 0; i < TCP_MAX_PCBS; i++) {
     if (tcp_pcbs[i].state == TCP_CLOSED) {
       return &tcp_pcbs[i];
+    }
+  }
+  /* Pool full under rapid reconnects: reclaim the oldest pcb stuck in a
+   * closing state (CLOSE_WAIT / LAST_ACK / FIN_WAIT / CLOSING). These are
+   * teardown remnants, not live connections - a listening server must keep
+   * accepting SYNs even if a close race leaked a slot. */
+  {
+    struct tcp_pcb *oldest = 0;
+    for (int i = 0; i < TCP_MAX_PCBS; i++) {
+      struct tcp_pcb *p = &tcp_pcbs[i];
+      if (p->state == TCP_CLOSE_WAIT || p->state == TCP_LAST_ACK ||
+          p->state == TCP_FIN_WAIT_1 || p->state == TCP_FIN_WAIT_2 ||
+          p->state == TCP_CLOSING || p->state == TCP_TIME_WAIT) {
+        if (!oldest || (int32_t)(p->state_tick - oldest->state_tick) < 0)
+          oldest = p;
+      }
+    }
+    if (oldest) {
+      oldest->state = TCP_CLOSED;
+      oldest->last_tx_flags = 0;
+      oldest->last_tx_len = 0;
+      oldest->app_rx_len = 0;
+      return oldest;
     }
   }
   return NULL;
@@ -409,6 +434,32 @@ void tcp_tick(uint32_t now_ticks) {
   (void)now_ticks;
   for (int i = 0; i < TCP_MAX_PCBS; i++) {
     struct tcp_pcb *pcb = &tcp_pcbs[i];
+
+    /* Idle/closing reaper: a pcb that has seen no packets for 60s
+     * (ESTABLISHED - e.g. a browser pre-connect that never sent data and
+     * whose client vanished) or has sat in a closing state for 30s is
+     * dead weight holding one of only TCP_MAX_PCBS slots. Reclaim it. */
+    if (pcb->state == TCP_ESTABLISHED && pcb->local_port != 22 &&
+        pcb->state_tick != 0 &&
+        (uint32_t)(pit_ticks - pcb->state_tick) > (PIT_HZ * 60u)) {
+      pcb->state = TCP_CLOSED;
+      pcb->last_tx_flags = 0;
+      pcb->last_tx_len = 0;
+      pcb->app_rx_len = 0;
+      continue;
+    }
+    if ((pcb->state == TCP_CLOSE_WAIT || pcb->state == TCP_LAST_ACK ||
+         pcb->state == TCP_FIN_WAIT_1 || pcb->state == TCP_FIN_WAIT_2 ||
+         pcb->state == TCP_CLOSING || pcb->state == TCP_TIME_WAIT) &&
+        pcb->state_tick != 0 &&
+        (uint32_t)(pit_ticks - pcb->state_tick) > (PIT_HZ * 30u)) {
+      pcb->state = TCP_CLOSED;
+      pcb->last_tx_flags = 0;
+      pcb->last_tx_len = 0;
+      pcb->app_rx_len = 0;
+      continue;
+    }
+
     // Retransmit for handshake/close, and best-effort for last small data
     // segment.
     if (pcb->last_tx_flags == 0)
@@ -540,6 +591,7 @@ static void tcp_input_body(struct pbuf *p, ip_addr_t src, ip_addr_t dst) {
   (void)tcp_payload_len;
 #endif
 
+  pcb->state_tick = pit_ticks;
   if (pcb->state == TCP_LISTEN) {
     if (flags & TCP_SYN) {
       // Accept connection: Create NEW PCB
@@ -567,6 +619,7 @@ static void tcp_input_body(struct pbuf *p, ip_addr_t src, ip_addr_t dst) {
       npcb->snd_nxt = 1000 + (pit_ticks % 10000); // Randomize ISN slightly
       npcb->snd_una = npcb->snd_nxt;
       npcb->state = TCP_SYN_RCVD;
+      npcb->state_tick = pit_ticks;
       npcb->app_rx_len = 0;  // Initialize RX buffer
       npcb->peer_wnd = 65535u;
 

@@ -452,32 +452,54 @@ void e1000_napi_schedule(void) { e1000_napi_scheduled = 1; }
 
 int e1000_napi_is_scheduled(void) { return e1000_napi_scheduled ? 1 : 0; }
 
-/* QEMU: e1000_has_rxbufs() is false when RDH == RDT — no further RX. Old drivers
- * also left rx_head one past RDH; after unstick the next DD lands at RDH. */
+/* RX ring health check + recovery, every napi poll.
+ *
+ * Old behavior: only device 0, only when RDH == RDT, blind re-point of RDT.
+ * That blind re-point could race an arriving packet and desync the driver's
+ * rx_head from the hardware RDH; once desynced, the driver consumed the
+ * wrong descriptors and the NIC went deaf from the outside (ARP requests
+ * went unanswered, the interface effectively died hours into uptime).
+ *
+ * New behavior: for EVERY device, compare the hardware RDH against the
+ * driver's rx_head. Pending-but-unconsumed descriptors whose DD bit never
+ * sets (8 consecutive polls) mean the indexes desynced - force them back
+ * into agreement (rx_head = RDH, RDT = RDH-1). In-sync rings are untouched. */
 static void e1000_rx_qemu_unstick_rdh_rdt(void) {
-  if (e1000_device_count <= 0)
-    return;
-  e1000_dev_t *dev = &e1000_devices[0];
-  if (!dev->present || (!dev->mmio && !dev->io_base) || !dev->enabled)
-    return;
-  e1000_rings_t *rings = e1000_rings[0];
-  if (!rings)
-    return;
   const uint32_t REG_RDH = 0x2810;
   const uint32_t REG_RDT = 0x2818;
-  uint32_t rdh = e1000_reg_read(dev, REG_RDH) % E1000_RX_RING_SIZE;
-  uint32_t rdt = e1000_reg_read(dev, REG_RDT) % E1000_RX_RING_SIZE;
-  if (rdh != rdt)
-    return;
-  uint32_t fix =
-      (rdh + (uint32_t)E1000_RX_RING_SIZE - 1u) % (uint32_t)E1000_RX_RING_SIZE;
-  e1000_reg_write(dev, REG_RDT, fix);
-  rings->rx_head = rdh;
-  // #region agent log
-  static uint32_t unstick_log_n;
-  if (++unstick_log_n <= 4u)
-    agent_dbg_evt("M", "e1000", "rdh_eq_rdt_unstick", rdh, fix);
-  // #endregion
+  for (int di = 0; di < e1000_device_count; di++) {
+    e1000_dev_t *dev = &e1000_devices[di];
+    if (!dev->present || (!dev->mmio && !dev->io_base) || !dev->enabled)
+      continue;
+    e1000_rings_t *rings = e1000_rings[di];
+    if (!rings)
+      continue;
+    uint32_t rdh = e1000_reg_read(dev, REG_RDH) % E1000_RX_RING_SIZE;
+    uint32_t pending =
+        (rdh + (uint32_t)E1000_RX_RING_SIZE - rings->rx_head) %
+        (uint32_t)E1000_RX_RING_SIZE;
+    if (pending == 0)
+      continue; /* idle and in sync */
+    volatile e1000_rx_desc_t *d = &rings->rx_ring[rings->rx_head];
+    if (d->status & 0x1u)
+      continue; /* descriptor ready; the poll will consume it normally */
+    /* RDH claims pending data but the head descriptor has no DD bit:
+     * the indexes desynced. Confirm it sticks for 8 consecutive polls
+     * (~160ms at 50 polls/s) before forcing a re-sync. */
+    static uint8_t stuck_n[MAX_E1000_DEVICES];
+    if (++stuck_n[di] < 8u)
+      continue;
+    stuck_n[di] = 0;
+    rings->rx_head = rdh;
+    uint32_t fix =
+        (rdh + (uint32_t)E1000_RX_RING_SIZE - 1u) % (uint32_t)E1000_RX_RING_SIZE;
+    e1000_reg_write(dev, REG_RDT, fix);
+    // #region agent log
+    static uint32_t unstick_log_n;
+    if (++unstick_log_n <= 4u)
+      agent_dbg_evt("M", "e1000", "rx_resync", di, fix);
+    // #endregion
+  }
 }
 
 static int e1000_rx_pending_any(void) {

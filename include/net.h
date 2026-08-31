@@ -115,6 +115,7 @@ struct tcp_pcb {
   uint16_t local_port;
   uint16_t remote_port;
   volatile enum tcp_state state;
+  uint32_t state_tick; /* last time this pcb saw a packet (idle reaper) */
   uint32_t snd_nxt;
   uint32_t snd_una; // Send unacknowledged
   uint32_t rcv_nxt;
