@@ -5898,7 +5898,11 @@ static int http_parse_response(const uint8_t *buf, uint16_t len,
         buf[i + 5] <= '9')
     {
       // Found HTTP/ version, skip to status code
-      i += 8; // Skip "HTTP/1.x "
+      i += 5; // Skip "HTTP/"
+      while (i < len && buf[i] != ' ')
+        i++; // skip the version token ("1.0", "1.1", "2", ...)
+      while (i < len && buf[i] == ' ')
+        i++; // skip the space(s) before the status code
       if (i + 3 < len && buf[i] >= '0' && buf[i] <= '9')
       {
         *status_code = (uint16_t)((buf[i] - '0') * 100 +
@@ -6588,6 +6592,16 @@ int appinstall_fetch(uint32_t ip, uint16_t port, const char *name)
   }
   if (status_code != 200)
   {
+    log_writestring("appinstall: status=");
+    log_write_u32((uint32_t)status_code);
+    log_writestring(" rxlen=");
+    log_write_u32((uint32_t)pcb->app_rx_len);
+    log_writestring(" first=[");
+    for (int i = 0; i < 16 && (uint32_t)i < pcb->app_rx_len; i++)
+      log_putchar((pcb->app_rx_buf[i] >= 32 && pcb->app_rx_buf[i] < 127)
+                      ? (char)pcb->app_rx_buf[i]
+                      : '.');
+    log_writestring("]\n");
     tcp_close(pcb);
     return -4;
   }

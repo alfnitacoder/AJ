@@ -491,26 +491,10 @@ static void http_handle_raw_app(struct tcp_pcb *pcb, struct http_request *req)
     int tlen = 0;
     if (webreg_lookup(name, &text, &tlen) && text && tlen > 0)
     {
-      static char hdr[96];
-      char *h = hdr;
-      const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
-      for (int k = 0; h1[k]; k++) *h++ = h1[k];
-      /* length */
-      char lenbuf[12];
-      int lb = 0;
-      if (tlen == 0) lenbuf[lb++] = '0';
-      {
-        int v = tlen;
-        char tmp[10];
-        int tn = 0;
-        while (v > 0) { tmp[tn++] = (char)('0' + (v % 10)); v /= 10; }
-        while (tn > 0) lenbuf[lb++] = tmp[--tn];
-      }
-      for (int k = 0; k < lb; k++) *h++ = lenbuf[k];
-      const char *h2 = "\r\n\r\n";
-      for (int k = 0; h2[k]; k++) *h++ = h2[k];
-      *h = 0;
-      http_send_page_buf(pcb, hdr, text, tlen);
+      /* Status line only - http_send_page_buf appends its own
+       * Content-Type/Content-Length headers. Passing a full header block
+       * here produced double headers and broke appinstall parsing. */
+      http_send_page_buf(pcb, "HTTP/1.0 200 OK\r\n", text, tlen);
       return;
     }
   }
@@ -554,27 +538,7 @@ static void http_handle_raw_app(struct tcp_pcb *pcb, struct http_request *req)
     rawbuf[k] = buf[k];
   kfree(buf);
 
-  static char hdr[96];
-  {
-    char *h = hdr;
-    const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
-    for (int k = 0; h1[k]; k++) *h++ = h1[k];
-    char lenbuf[12];
-    int lb = 0;
-    if (blen == 0) lenbuf[lb++] = '0';
-    {
-      uint32_t v = blen;
-      char tmp[10];
-      int tn = 0;
-      while (v > 0) { tmp[tn++] = (char)('0' + (v % 10u)); v /= 10u; }
-      while (tn > 0) lenbuf[lb++] = tmp[--tn];
-    }
-    for (int k = 0; k < lb; k++) *h++ = lenbuf[k];
-    const char *h2 = "\r\n\r\n";
-    for (int k = 0; h2[k]; k++) *h++ = h2[k];
-    *h = 0;
-  }
-  http_send_page_buf(pcb, hdr, (const char *)rawbuf, (int)blen);
+  http_send_page_buf(pcb, "HTTP/1.0 200 OK\r\n", (const char *)rawbuf, (int)blen);
 }
 
 static void http_handle_webapp(struct tcp_pcb *pcb, struct http_request *req)
