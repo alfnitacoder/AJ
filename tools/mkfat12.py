@@ -115,6 +115,7 @@ def lfn_entries(name: str, name83: bytes) -> list[bytes]:
 
 
 NETCFG_BYTES = b""
+NO_WEBAPP = False
 
 
 def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | None = None, kernel_bin: bytes | None = None) -> bytearray:
@@ -387,7 +388,7 @@ def build_image(files: list[FileEntry], total_sectors: int, boot_bin: bytes | No
 
     # ajlangweb apps: repo webapp/* -> /webapp/ in the image; the HTTP server
     # maps /app/<name> -> /webapp/<name>.aj (src/http.c http_handle_webapp).
-    if _P("webapp").is_dir():
+    if _P("webapp").is_dir() and not NO_WEBAPP:
         webapp_c = alloc_dir_cluster(0)
         add_root_entry_raw(dir_entry_83(b"WEBAPP     ", 0x10, webapp_c))
         for wf in sorted(_P("webapp").iterdir()):
@@ -416,11 +417,14 @@ def main() -> int:
     parser.add_argument("--kernel", help="Kernel binary")
     parser.add_argument("--model", help="Path to model.bin")
     parser.add_argument("--size-mb", type=int, default=0, help="Total size in MB")
+    parser.add_argument("--no-webapp", action="store_true",
+                        help="Skip webapp/ staging (fresh-user image: apps come from the store)")
     parser.add_argument("--netcfg", help="Write this file as /etc/NETWORK.CFG in the image")
     parser.add_argument("--netcfg-dir", help="Stage every file in this dir as /etc/<name> in the image")
     # (consumed below into NETCFG_BYTES; build_image writes it into /etc/)
     args = parser.parse_args()
-    global NETCFG_BYTES, NETCFG_DIR_FILES
+    global NETCFG_BYTES, NETCFG_DIR_FILES, NO_WEBAPP
+    NO_WEBAPP = bool(args.no_webapp)
     NETCFG_BYTES = b""
     NETCFG_DIR_FILES = []
     if args.netcfg:

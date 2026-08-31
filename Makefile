@@ -376,6 +376,9 @@ iso:
 	$(MAKE) $(ISO_IMG)
 
 # Server image with static network config baked in (etc/NETWORK.CFG)
+fresh-img: $(BOOT_OBJ) $(KERNEL_BIN)
+	python3 tools/mkfat12.py $(BUILD_DIR)/ajos-fresh.img --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN) --netcfg etc/NETWORK.FRESH.CFG --no-webapp
+	@echo "Fresh-user image: $(BUILD_DIR)/ajos-fresh.img (no apps baked - installs from the store at boot)"
 server-img: $(BOOT_OBJ) $(KERNEL_BIN)
 	python3 tools/mkfat12.py $(BUILD_DIR)/ajos-server.img --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN) --netcfg etc/NETWORK.CFG --netcfg-dir etc
 	@echo "Server image: $(BUILD_DIR)/ajos-server.img (network flip configs baked in)"

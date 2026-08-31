@@ -243,7 +243,7 @@ int netcfg_load_from_buffer(const char *buf, int len) {
 
 
 /* ---- Boot-time app manifest ("install <name> from <ip>") ---- */
-#define NETCFG_INSTALL_MAX 4
+#define NETCFG_INSTALL_MAX 6
 typedef struct {
   int used;
   char name[32];

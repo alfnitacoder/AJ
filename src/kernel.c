@@ -10018,6 +10018,8 @@ void kernel_main()
       log_writestring(iname);
       log_writestring("' from store...\n");
       int r = appinstall_fetch(istore, 80, iname);
+      if (r != 0)
+        r = appinstall_fetch(istore, 80, iname); /* one retry: the store TCP can race a fresh boot */
       if (r == 0)
       {
         log_writestring("[Store] installed '");
