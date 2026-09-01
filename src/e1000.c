@@ -843,34 +843,47 @@ void cmd_ifconfig(const char *args) {
       log_putchar('\n');
 
       {
+        /* Per-interface addresses: the global my_ip/mask/gw describe
+         * iface0 only - showing them for every NIC lied about dual-NIC. */
+        extern uint32_t arp_get_if_ip(int iface);
+        extern uint32_t ip4_get_if_netmask(int iface);
+        extern uint32_t ip4_get_if_gw(int iface);
+        uint32_t if_ip = arp_get_if_ip(i);
+        uint32_t if_mask = ip4_get_if_netmask(i);
+        uint32_t if_gw = ip4_get_if_gw(i);
+
         log_writestring("  IP: ");
-        log_write_u32((my_ip >> 24) & 0xFF);
-        log_putchar('.');
-        log_write_u32((my_ip >> 16) & 0xFF);
-        log_putchar('.');
-        log_write_u32((my_ip >> 8) & 0xFF);
-        log_putchar('.');
-        log_write_u32(my_ip & 0xFF);
+        if (if_ip == 0) {
+          log_writestring("(unset)");
+        } else {
+          log_write_u32((if_ip >> 24) & 0xFF);
+          log_putchar('.');
+          log_write_u32((if_ip >> 16) & 0xFF);
+          log_putchar('.');
+          log_write_u32((if_ip >> 8) & 0xFF);
+          log_putchar('.');
+          log_write_u32(if_ip & 0xFF);
+        }
         log_putchar('\n');
 
         log_writestring("  Netmask: ");
-        log_write_u32((mask >> 24) & 0xFF);
+        log_write_u32((if_mask >> 24) & 0xFF);
         log_putchar('.');
-        log_write_u32((mask >> 16) & 0xFF);
+        log_write_u32((if_mask >> 16) & 0xFF);
         log_putchar('.');
-        log_write_u32((mask >> 8) & 0xFF);
+        log_write_u32((if_mask >> 8) & 0xFF);
         log_putchar('.');
-        log_write_u32(mask & 0xFF);
+        log_write_u32(if_mask & 0xFF);
         log_putchar('\n');
 
         log_writestring("  Gateway: ");
-        log_write_u32((gw >> 24) & 0xFF);
+        log_write_u32((if_gw >> 24) & 0xFF);
         log_putchar('.');
-        log_write_u32((gw >> 16) & 0xFF);
+        log_write_u32((if_gw >> 16) & 0xFF);
         log_putchar('.');
-        log_write_u32((gw >> 8) & 0xFF);
+        log_write_u32((if_gw >> 8) & 0xFF);
         log_putchar('.');
-        log_write_u32(gw & 0xFF);
+        log_write_u32(if_gw & 0xFF);
         log_putchar('\n');
 
         log_writestring("  DNS: ");
