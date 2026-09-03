@@ -5094,6 +5094,12 @@ static void cmd_ping(const char *args)
     }
   }
 
+  /* Pinging one of our own addresses: no ARP needed - ip4_output loops
+   * the packet back locally. Without this, the ARP wait times out (nobody
+   * else answers for our IP) and the self-ping never runs. */
+  extern int arp_is_our_ip(uint32_t ip);
+  if (!arp_is_our_ip(next_hop))
+  {
   uint32_t start_ticks = pit_ticks;
   uint32_t arp_spins = 0;
   while (!arp_get_mac_for_ip(next_hop, &tmp_mac))
@@ -5108,6 +5114,7 @@ static void cmd_ping(const char *args)
     }
     sleep_ms(50);
     ssh_flow_pump_from_shell();
+  }
   }
 
   uint16_t ping_id = 0x1234;

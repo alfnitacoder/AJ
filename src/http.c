@@ -431,11 +431,23 @@ void http_handle_connection(struct tcp_pcb *pcb, const uint8_t *data, int len) {
       req.uri[1] == 'a' && req.uri[2] == 'u' && req.uri[3] == 't' &&
       req.uri[4] == 'h') {
     http_handle_auth(pcb, &req);
-  } else if (req.uri[0] == '/' &&
-             (req.uri[1] == '\0' ||
-              (req.uri[1] == 'l' && req.uri[2] == 'o' && req.uri[3] == 'g' &&
-               req.uri[4] == 'i' && req.uri[5] == 'n'))) {
+  } else if (req.uri[0] == '/' && req.uri[1] == 'l' && req.uri[2] == 'o' &&
+             req.uri[3] == 'g' && req.uri[4] == 'i' && req.uri[5] == 'n' &&
+             (req.uri[6] == '\0' || req.uri[6] == '?')) {
     http_serve_login_page(pcb);
+  } else if (req.uri[0] == '/' && req.uri[1] == '\0') {
+    /* Site root: serve the buildwithAJ home page directly, so visitors
+     * only need http://<box>/ instead of /app/buildwithaj. */
+    {
+      static const char root_target[] = "/app/buildwithaj";
+      int ri = 0;
+      while (root_target[ri] && ri < (int)sizeof(req.uri) - 1) {
+        req.uri[ri] = root_target[ri];
+        ri++;
+      }
+      req.uri[ri] = '\0';
+    }
+    http_handle_webapp(pcb, &req);
   } else if (req.uri[0] == '/' && req.uri[1] == 's' && req.uri[2] == 'u' &&
              req.uri[3] == 'c') {
     http_serve_success_page(pcb);

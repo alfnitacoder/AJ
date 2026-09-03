@@ -299,8 +299,11 @@ int ip4_output_ttl(struct pbuf *p, ip_addr_t dst, uint8_t proto, uint8_t ttl) {
 
   p->len += sizeof(struct ip4_hdr);
 
-  // Loopback handling: 127.x.x.x OR our own IP
-  if ((dst & 0xFF000000u) == 0x7F000000u || dst == ajos_ip) {
+  // Loopback handling: 127.x.x.x OR any of our own interface IPs
+  // (dual-NIC: pinging our .240 on iface1 must loop back locally, not
+  // go out the wire - the dev-1 TX may not even be needed for it).
+  if ((dst & 0xFF000000u) == 0x7F000000u || dst == arp_get_ajos_ip() ||
+      dst == arp_get_if_ip(1)) {
     ip4_input(p);
     return 0;
   }

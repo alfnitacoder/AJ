@@ -222,6 +222,15 @@ void arp_get_ajos_mac(uint8_t *mac) {
     mac[i] = e1000_mac[txd][i];
 }
 
+/* Is this IP one of our own interface addresses? (loopback candidates) */
+int arp_is_our_ip(uint32_t ip) {
+  if (ip == arp_get_ajos_ip())
+    return 1;
+  if (ip == arp_get_if_ip(1))
+    return 1;
+  return 0;
+}
+
 int arp_get_mac_for_ip(uint32_t ip, eth_addr_t *out_mac) {
   /* IP broadcast destinations map straight to the Ethernet broadcast MAC.
    * Without this, broadcast-bound packets (DHCP offers!) queue behind an
