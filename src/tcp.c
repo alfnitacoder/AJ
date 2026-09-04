@@ -863,6 +863,11 @@ static void tcp_input_body(struct pbuf *p, ip_addr_t src, ip_addr_t dst) {
             if (pcb->app_rx_len < TCP_APP_RX_MAX && pcb->local_port == 80) {
               tcp_check_http_data(pcb, payload, data_len);
             }
+            if (pcb->local_port == 443) {
+              /* TLS 1.2 server (HTTPS): handshake + encrypted HTTP */
+              extern void tls_server_input(struct tcp_pcb *pcb);
+              tls_server_input(pcb);
+            }
           }
         }
 

@@ -113,3 +113,16 @@ int tls_read(struct tcp_pcb *pcb, uint8_t *out, uint32_t *len);
  * all their CSS into <head>) run 100-200KB before any visible text, so
  * this needs real headroom, not just "big enough for a paragraph". */
 #define TLS_APP_DATA_CAP 393216
+
+/* TLS 1.2 server (src/tls.c) - HTTPS listener on port 443. */
+struct tcp_pcb;
+void tls_server_reset(void);
+void tls_server_input(struct tcp_pcb *pcb);
+int tls_server_write(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len);
+
+/* PKCS#1 v1.5 SHA-256 signature with the host RSA key (src/crypto.c).
+ * Signs the embedded SSH host key's private exponent over a 32-byte
+ * digest; sig_out receives the 256-byte big-endian signature.
+ * Returns 256 on success, 0 on failure. Used by the TLS server for the
+ * ServerKeyExchange signature (ECDHE_RSA key exchange). */
+int tls_rsa_sign_sha256(const uint8_t *hash, uint8_t *sig_out);

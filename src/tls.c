@@ -8,6 +8,7 @@
  * NIST AES-128-GCM test case. Run with: tls selftest
  */
 #include "crypto.h"
+#include "tls_cert.h"
 #include "net.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -1241,4 +1242,631 @@ int tls_write(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
 /* poll decrypted app data; returns decrypted bytes this call (or -1) */
 int tls_read(struct tcp_pcb *pcb, uint8_t *out, uint32_t *len) {
   return tls_pump(pcb, 2, out, len);
+}
+
+
+/* ================================================================== */
+/* TLS 1.2 server (HTTPS, port 443): ECDHE-RSA-AES128-GCM-SHA256 with  */
+/* x25519 — the mirror image of the client above.                      */
+/*                                                                     */
+/* State is kept separate from the client session so an HTTPS listener */
+/* connection and an in-OS browser session never clobber each other.   */
+/* The certificate (include/tls_cert.h) is a self-signed X.509v3 built */
+/* around the same RSA-2048 host key the SSH server uses; the per-     */
+/* connection ServerKeyExchange signature (tls_rsa_sign_sha256) is     */
+/* what proves the server actually holds the private key.              */
+/*                                                                     */
+/* Key/IV usage (fixed by TLS roles, not by perspective):              */
+/*   we send with the SERVER write key (skey/siv/sseq),                */
+/*   we receive with the CLIENT write key (ckey/civ/cseq).             */
+/* ================================================================== */
+
+#define TLS_SRV_HS_MAX 16384
+
+#define TLS_ST_CH  0 /* expect ClientHello */
+#define TLS_ST_CKE 1 /* flight sent: expect ClientKeyExchange/CCS/Finished */
+#define TLS_ST_APP 2 /* established: decrypting application data */
+
+static struct {
+  uint8_t state;
+  uint8_t ccs_seen;
+  uint8_t cke_done;
+  uint8_t established;
+  uint8_t client_random[32];
+  uint8_t server_random[32];
+  uint8_t master[48];
+  uint8_t ckey[16]; /* client write key (we receive with it) */
+  uint8_t skey[16]; /* server write key (we send with it) */
+  uint8_t civ[4];
+  uint8_t siv[4];
+  uint64_t cseq, sseq;
+  uint8_t epriv[32];             /* server ephemeral x25519 private */
+  uint8_t hs[TLS_SRV_HS_MAX];    /* handshake transcript */
+  uint32_t hs_len;
+  uint8_t plain[TLS_SRV_HS_MAX]; /* decrypted HTTP request bytes */
+  uint32_t plain_len;
+} tls_srv;
+
+static void srv_hs_append(const uint8_t *msg, uint32_t len) {
+  if (tls_srv.hs_len + len > TLS_SRV_HS_MAX)
+    return;
+  for (uint32_t i = 0; i < len; i++)
+    tls_srv.hs[tls_srv.hs_len + i] = msg[i];
+  tls_srv.hs_len += len;
+}
+
+void tls_server_reset(void) {
+  tls_srv.state = TLS_ST_CH;
+  tls_srv.ccs_seen = 0;
+  tls_srv.cke_done = 0;
+  tls_srv.established = 0;
+  tls_srv.cseq = 0;
+  tls_srv.sseq = 0;
+  tls_srv.hs_len = 0;
+  tls_srv.plain_len = 0;
+}
+
+/* ---- record layer (server side) ---- */
+
+static int tls_srv_send_record_raw(struct tcp_pcb *pcb, uint8_t type,
+                                   const uint8_t *payload, uint16_t len) {
+  uint8_t hdr[5];
+  hdr[0] = type;
+  hdr[1] = 0x03;
+  hdr[2] = 0x03;
+  put16(hdr + 3, len);
+  if (tcp_send(pcb, hdr, 5) != 0)
+    return 0;
+  if (len && tcp_send(pcb, payload, len) != 0)
+    return 0;
+  return 1;
+}
+
+/* send plaintext (handshake) or GCM-protected (app data) server record */
+static int tls_srv_send_record(struct tcp_pcb *pcb, uint8_t type,
+                               const uint8_t *payload, uint16_t len) {
+  if (!tls_srv.established)
+    return tls_srv_send_record_raw(pcb, type, payload, len);
+
+  static uint8_t out[5 + 8 + 16384 + 16];
+  if (len > 16384)
+    return 0;
+  uint8_t nonce[12], aad[13], tag[16];
+  for (int i = 0; i < 4; i++)
+    nonce[i] = tls_srv.siv[i];
+  for (int i = 0; i < 8; i++)
+    nonce[4 + i] = (uint8_t)(tls_srv.sseq >> (56 - 8 * i));
+  /* AAD = seq || type || version || length */
+  for (int i = 0; i < 8; i++)
+    aad[i] = (uint8_t)(tls_srv.sseq >> (56 - 8 * i));
+  aad[8] = type;
+  aad[9] = 0x03;
+  aad[10] = 0x03;
+  put16(aad + 11, len);
+  for (uint32_t i = 0; i < len; i++)
+    out[13 + i] = payload[i];
+  aes128gcm_encrypt(tls_srv.skey, nonce, aad, 13, out + 13, len, tag);
+  tls_srv.sseq++;
+
+  out[0] = type;
+  out[1] = 0x03;
+  out[2] = 0x03;
+  put16(out + 3, (uint16_t)(len + 8 + 16));
+  for (int i = 0; i < 8; i++)
+    out[5 + i] = nonce[4 + i];
+  for (int i = 0; i < 16; i++)
+    out[13 + len + i] = tag[i];
+  return tcp_send(pcb, out, (uint16_t)(13 + len + 16)) == 0;
+}
+
+/* decrypt one client->server GCM record body.
+ * rec = explicit(8) || ct || tag(16). Returns plaintext len or -1. */
+static int tls_srv_gcm_open(uint8_t type, const uint8_t *rec, uint16_t reclen,
+                            uint8_t *out) {
+  if (reclen < 8 + 16)
+    return -1;
+  uint16_t ctlen = (uint16_t)(reclen - 8 - 16);
+  uint8_t nonce[12], aad[13], tag[16];
+  for (int i = 0; i < 4; i++)
+    nonce[i] = tls_srv.civ[i];
+  for (int i = 0; i < 8; i++)
+    nonce[4 + i] = rec[i];
+  for (int i = 0; i < 8; i++)
+    aad[i] = (uint8_t)(tls_srv.cseq >> (56 - 8 * i));
+  aad[8] = type;
+  aad[9] = 0x03;
+  aad[10] = 0x03;
+  put16(aad + 11, ctlen);
+  for (int i = 0; i < 16; i++)
+    tag[i] = rec[8 + ctlen + i];
+
+  uint8_t h[16], y[16], ek[16], j0[16], ctr[16], lens[16];
+  for (int i = 0; i < 16; i++) {
+    h[i] = 0;
+    j0[i] = 0;
+    y[i] = 0;
+  }
+  {
+    uint8_t zero[16], outb[16];
+    for (int i = 0; i < 16; i++)
+      zero[i] = 0;
+    aes128_ctr_keystream_block(tls_srv.ckey, zero, outb);
+    for (int i = 0; i < 16; i++)
+      h[i] = outb[i];
+  }
+  for (int i = 0; i < 12; i++)
+    j0[i] = nonce[i];
+  j0[15] = 1;
+  aes128_ctr_keystream_block(tls_srv.ckey, j0, ek);
+
+  const ghash_table_t *gt = ghash_table_for(h, GHASH_SLOT_DECRYPT);
+  ghash_update(y, gt, aad, 13);
+  ghash_update(y, gt, rec + 8, ctlen);
+  uint64_t ab = 13u * 8u;
+  uint64_t cb = (uint64_t)ctlen * 8u;
+  for (int i = 0; i < 8; i++) {
+    lens[i] = (uint8_t)(ab >> (56 - 8 * i));
+    lens[8 + i] = (uint8_t)(cb >> (56 - 8 * i));
+  }
+  ghash_update(y, gt, lens, 16);
+  for (int i = 0; i < 16; i++)
+    if ((uint8_t)(y[i] ^ ek[i]) != tag[i])
+      return -1;
+
+  for (int i = 0; i < 16; i++)
+    ctr[i] = j0[i];
+  uint32_t off = 0;
+  while (off < ctlen) {
+    uint8_t ks[16];
+    ctr_inc(ctr);
+    aes128_ctr_keystream_block(tls_srv.ckey, ctr, ks);
+    uint32_t n = ctlen - off;
+    if (n > 16)
+      n = 16;
+    for (uint32_t i = 0; i < n; i++)
+      out[off + i] = rec[8 + off + i] ^ ks[i];
+    off += n;
+  }
+  tls_srv.cseq++;
+  return ctlen;
+}
+
+/* ---- handshake ---- */
+
+/* minimal ClientHello parse: pull client_random, require our suite */
+static int srv_parse_ch(const uint8_t *body, uint32_t blen) {
+  if (blen < 35)
+    return 0;
+  for (int i = 0; i < 32; i++)
+    tls_srv.client_random[i] = body[2 + i];
+  uint8_t sid_len = body[34];
+  if ((uint32_t)35 + sid_len + 2 > blen)
+    return 0;
+  uint16_t cs_len = ((uint16_t)body[35 + sid_len] << 8) | body[36 + sid_len];
+  if ((uint32_t)37 + sid_len + cs_len > blen)
+    return 0;
+  const uint8_t *cs = body + 37 + sid_len;
+  for (uint16_t i = 0; i + 1 < cs_len; i += 2)
+    if (cs[i] == 0xC0 && cs[i + 1] == 0x2F)
+      return 1; /* TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 */
+  return 0;
+}
+
+/* ServerHello + Certificate + ServerKeyExchange + ServerHelloDone, all in
+ * one plaintext record. SKE is signed with the host RSA key (one 2048-bit
+ * private op per connection — same cost as an SSH KEX signature). */
+static int srv_send_flight(struct tcp_pcb *pcb) {
+  tls_random(tls_srv.epriv, 32);
+  uint8_t epub[32];
+  x25519_base(epub, tls_srv.epriv);
+  tls_random(tls_srv.server_random, 32);
+
+  /* --- ServerHello --- */
+  static uint8_t sh[42];
+  sh[0] = 2;
+  sh[1] = 0;
+  sh[2] = 0;
+  sh[3] = 38;
+  sh[4] = 0x03;
+  sh[5] = 0x03;
+  for (int i = 0; i < 32; i++)
+    sh[6 + i] = tls_srv.server_random[i];
+  sh[38] = 0; /* session id: empty */
+  sh[39] = 0xC0;
+  sh[40] = 0x2F;
+  sh[41] = 0; /* compression: null */
+
+  /* --- Certificate --- */
+  static uint8_t cert_msg[10 + 1024];
+  uint32_t cl = TLS_SRV_CERT_LEN;
+  cert_msg[0] = 11; /* handshake type: certificate */
+  cert_msg[1] = (uint8_t)((cl + 6) >> 16);
+  cert_msg[2] = (uint8_t)((cl + 6) >> 8);
+  cert_msg[3] = (uint8_t)(cl + 6);
+  cert_msg[4] = 0; /* chain length hi */
+  cert_msg[5] = (uint8_t)((cl + 3) >> 8);
+  cert_msg[6] = (uint8_t)(cl + 3);
+  cert_msg[7] = 0; /* entry length hi */
+  cert_msg[8] = (uint8_t)(cl >> 8);
+  cert_msg[9] = (uint8_t)cl;
+  for (uint32_t i = 0; i < cl; i++)
+    cert_msg[10 + i] = tls_srv_cert_der[i];
+
+  /* --- ServerKeyExchange --- */
+  static uint8_t ske[300];
+  ske[0] = 12;
+  ske[1] = 0;
+  ske[2] = (uint8_t)(296 >> 8);
+  ske[3] = (uint8_t)296;
+  ske[4] = 3; /* curve_type: named_curve */
+  ske[5] = 0x00;
+  ske[6] = 0x1D; /* x25519 */
+  ske[7] = 32;
+  for (int i = 0; i < 32; i++)
+    ske[8 + i] = epub[i];
+  /* signature covers client_random || server_random || server_params */
+  uint8_t to_sign[100];
+  for (int i = 0; i < 32; i++)
+    to_sign[i] = tls_srv.client_random[i];
+  for (int i = 0; i < 32; i++)
+    to_sign[32 + i] = tls_srv.server_random[i];
+  for (int i = 0; i < 36; i++)
+    to_sign[64 + i] = ske[4 + i];
+  uint8_t hash[32], sig[256];
+  sha256(to_sign, sizeof(to_sign), hash);
+  if (tls_rsa_sign_sha256(hash, sig) != 256) {
+    log_writestring("[TLS-SRV] SKE sign failed\n");
+    return 0;
+  }
+  ske[40] = 0x04; /* sha256 */
+  ske[41] = 0x01; /* rsa_pkcs1 */
+  ske[42] = 0x01;
+  ske[43] = 0x00; /* 256-byte signature */
+  for (int i = 0; i < 256; i++)
+    ske[44 + i] = sig[i];
+
+  /* --- ServerHelloDone --- */
+  static const uint8_t shd[4] = {14, 0, 0, 0};
+
+  /* transcript: SH, Cert, SKE, SHD */
+  srv_hs_append(sh, sizeof(sh));
+  srv_hs_append(cert_msg, 10 + cl);
+  srv_hs_append(ske, sizeof(ske));
+  srv_hs_append(shd, 4);
+
+  /* one plaintext record with all four messages */
+  static uint8_t flight[42 + 10 + 1024 + 300 + 4];
+  uint32_t fn = 0;
+  for (uint32_t i = 0; i < sizeof(sh); i++)
+    flight[fn++] = sh[i];
+  for (uint32_t i = 0; i < 10 + cl; i++)
+    flight[fn++] = cert_msg[i];
+  for (uint32_t i = 0; i < sizeof(ske); i++)
+    flight[fn++] = ske[i];
+  for (int i = 0; i < 4; i++)
+    flight[fn++] = shd[i];
+  log_writestring("[TLS-SRV] flight sent (");
+  log_write_u32(fn);
+  log_writestring(" bytes)\n");
+  return tls_srv_send_record_raw(pcb, 22, flight, (uint16_t)fn);
+}
+
+static int srv_do_cke(const uint8_t *body, uint32_t blen) {
+  if (blen < 33 || body[0] != 32)
+    return 0;
+  uint8_t shared[32];
+  x25519_scalarmult(shared, tls_srv.epriv, body + 1);
+
+  uint8_t ms_seed[64], kb_seed[64], keyblk[40];
+  for (int i = 0; i < 32; i++) {
+    ms_seed[i] = tls_srv.client_random[i];
+    ms_seed[32 + i] = tls_srv.server_random[i];
+  }
+  tls_prf(shared, 32, "master secret", ms_seed, 64, tls_srv.master, 48);
+  for (int i = 0; i < 32; i++) {
+    kb_seed[i] = tls_srv.server_random[i];
+    kb_seed[32 + i] = tls_srv.client_random[i];
+  }
+  tls_prf(tls_srv.master, 48, "key expansion", kb_seed, 64, keyblk, 40);
+  for (int i = 0; i < 16; i++) {
+    tls_srv.ckey[i] = keyblk[i];
+    tls_srv.skey[i] = keyblk[16 + i];
+  }
+  for (int i = 0; i < 4; i++) {
+    tls_srv.civ[i] = keyblk[32 + i];
+    tls_srv.siv[i] = keyblk[36 + i];
+  }
+  tls_srv.cke_done = 1;
+  return 1;
+}
+
+/* decrypt + verify client Finished, then send ours. 1 on success. */
+static int srv_do_finished(struct tcp_pcb *pcb, const uint8_t *rec,
+                           uint16_t rlen) {
+  uint8_t pt[64];
+  int pl = tls_srv_gcm_open(22, rec, rlen, pt);
+  if (pl < 16 || pt[0] != 20 || pt[1] != 0 || pt[2] != 0 || pt[3] != 12)
+    return 0;
+  uint8_t hash[32], vd[12];
+  sha256(tls_srv.hs, tls_srv.hs_len, hash);
+  tls_prf(tls_srv.master, 48, "client finished", hash, 32, vd, 12);
+  for (int i = 0; i < 12; i++)
+    if (pt[4 + i] != vd[i])
+      return 0;
+
+  /* client Finished enters the transcript (header + verify_data) */
+  uint8_t fin_c[16], fin_s[16];
+  fin_c[0] = 20;
+  fin_c[1] = 0;
+  fin_c[2] = 0;
+  fin_c[3] = 12;
+  for (int i = 0; i < 12; i++)
+    fin_c[4 + i] = vd[i];
+  srv_hs_append(fin_c, 16);
+
+  /* server ChangeCipherSpec (plaintext) — switches the client's receive
+   * epoch, then our Finished goes out GCM-encrypted */
+  uint8_t ccs = 1;
+  if (!tls_srv_send_record_raw(pcb, 20, &ccs, 1))
+    return 0;
+  tls_srv.established = 1;
+  sha256(tls_srv.hs, tls_srv.hs_len, hash);
+  tls_prf(tls_srv.master, 48, "server finished", hash, 32, vd, 12);
+  fin_s[0] = 20;
+  fin_s[1] = 0;
+  fin_s[2] = 0;
+  fin_s[3] = 12;
+  for (int i = 0; i < 12; i++)
+    fin_s[4 + i] = vd[i];
+  if (!tls_srv_send_record(pcb, 22, fin_s, 16)) {
+    tls_srv.established = 0;
+    return 0;
+  }
+  srv_hs_append(fin_s, 16);
+  return 1;
+}
+
+static void srv_fatal(struct tcp_pcb *pcb, uint8_t desc) {
+  uint8_t a[2];
+  a[0] = 2; /* fatal */
+  a[1] = desc;
+  log_writestring("[TLS-SRV] fatal alert, desc=");
+  log_write_u32(desc);
+  log_putchar('\n');
+  tls_srv_send_record_raw(pcb, 21, a, 2);
+  tcp_close(pcb);
+  tls_server_reset();
+}
+
+/* is the decrypted stream a complete HTTP request? (same shape as
+ * tcp_check_http_data: headers done, POST body complete) */
+static int srv_http_ready(void) {
+  uint32_t n = tls_srv.plain_len;
+  if (n < 14)
+    return 0;
+  uint32_t body_start = 0;
+  int has_end = 0;
+  for (uint32_t i = 0; i + 3 < n; i++) {
+    if (tls_srv.plain[i] == '\r' && tls_srv.plain[i + 1] == '\n' &&
+        tls_srv.plain[i + 2] == '\r' && tls_srv.plain[i + 3] == '\n') {
+      body_start = i + 4;
+      has_end = 1;
+      break;
+    }
+  }
+  if (!has_end)
+    return 0;
+  if (tls_srv.plain[0] == 'P' && tls_srv.plain[1] == 'O' &&
+      tls_srv.plain[2] == 'S' && tls_srv.plain[3] == 'T') {
+    static const char cl_hdr[] = "Content-Length:";
+    uint32_t cl = 0;
+    int have_cl = 0;
+    for (uint32_t i = 0; i + sizeof(cl_hdr) - 1 < body_start; i++) {
+      int m = 1;
+      for (uint32_t k = 0; k < sizeof(cl_hdr) - 1; k++)
+        if (tls_srv.plain[i + k] != cl_hdr[k]) {
+          m = 0;
+          break;
+        }
+      if (m) {
+        uint32_t j = i + sizeof(cl_hdr) - 1;
+        while (j < n && tls_srv.plain[j] == ' ')
+          j++;
+        while (j < n && tls_srv.plain[j] >= '0' && tls_srv.plain[j] <= '9') {
+          cl = cl * 10 + (uint32_t)(tls_srv.plain[j] - '0');
+          j++;
+        }
+        have_cl = 1;
+        break;
+      }
+    }
+    if (have_cl && n - body_start < cl)
+      return 0;
+  }
+  return 1;
+}
+
+/* called from tcp_input for every port-443 connection with buffered RX
+ * data. Drives the server handshake and, once established, decrypts app
+ * data and dispatches complete HTTP requests to http_handle_connection. */
+void tls_server_input(struct tcp_pcb *pcb) {
+  if (!pcb || pcb->app_rx_len == 0)
+    return;
+  uint16_t len = pcb->app_rx_len;
+  uint32_t off = 0;
+  int stop = 0;
+  while (!stop && off + 5 <= len) {
+    const uint8_t *r = pcb->app_rx_buf + off;
+    uint8_t type = r[0];
+    uint16_t rlen = (uint16_t)((r[3] << 8) | r[4]);
+    if (off + 5 + rlen > len)
+      break; /* incomplete record: wait for more TCP data */
+    const uint8_t *body = r + 5;
+
+    if (tls_srv.state == TLS_ST_CH) {
+      if (type == 22 && rlen >= 4 && body[0] == 1) {
+        uint32_t ml =
+            ((uint32_t)body[1] << 16) | ((uint32_t)body[2] << 8) | body[3];
+        if (4 + ml > rlen) /* fragmented ClientHello: unsupported */
+          break;
+        tls_server_reset();
+        log_writestring("[TLS-SRV] ClientHello\n");
+        srv_hs_append(body, 4 + ml);
+        if (srv_parse_ch(body + 4, ml) && srv_send_flight(pcb)) {
+          tls_srv.state = TLS_ST_CKE;
+        } else {
+          srv_fatal(pcb, 40); /* handshake_failure */
+          stop = 1;
+        }
+      } else {
+        srv_fatal(pcb, 10); /* unexpected_message */
+        stop = 1;
+      }
+    } else if (tls_srv.state == TLS_ST_CKE) {
+      if (type == 20 && rlen >= 1) {
+        tls_srv.ccs_seen = 1;
+      } else if (type == 21 && rlen == 2) {
+        /* plaintext client alert: handshake abandoned */
+        tcp_close(pcb);
+        tls_server_reset();
+        stop = 1;
+      } else if (type == 22 && !tls_srv.ccs_seen && rlen >= 4 &&
+                 body[0] == 1) {
+        /* plaintext ClientHello while waiting for CKE: the previous
+         * handshake was abandoned mid-flight. Restart on this pcb. */
+        uint32_t ml2 =
+            ((uint32_t)body[1] << 16) | ((uint32_t)body[2] << 8) | body[3];
+        if (4 + ml2 > rlen)
+          break;
+        tls_server_reset();
+        log_writestring("[TLS-SRV] ClientHello (restart)\n");
+        srv_hs_append(body, 4 + ml2);
+        if (srv_parse_ch(body + 4, ml2) && srv_send_flight(pcb)) {
+          tls_srv.state = TLS_ST_CKE;
+        } else {
+          srv_fatal(pcb, 40);
+          stop = 1;
+        }
+      } else if (type == 22) {
+        uint32_t ml =
+            ((uint32_t)body[1] << 16) | ((uint32_t)body[2] << 8) | body[3];
+        if (!tls_srv.cke_done) {
+          if (body[0] != 16 || 4 + ml > rlen || !srv_do_cke(body + 4, ml)) {
+            srv_fatal(pcb, 10);
+            stop = 1;
+          } else {
+            srv_hs_append(body, 4 + ml);
+            log_writestring("[TLS-SRV] ClientKeyExchange ok\n");
+          }
+        } else if (tls_srv.ccs_seen) {
+          if (srv_do_finished(pcb, body, rlen)) {
+            tls_srv.state = TLS_ST_APP;
+            log_writestring("[TLS-SRV] handshake complete (HTTPS ready)\n");
+          } else {
+            log_writestring("[TLS-SRV] client Finished failed\n");
+            tcp_close(pcb);
+            tls_server_reset();
+            stop = 1;
+          }
+        } else {
+          srv_fatal(pcb, 10);
+          stop = 1;
+        }
+      } else if (type == 21) { /* client alert */
+        tcp_close(pcb);
+        tls_server_reset();
+        stop = 1;
+      }
+    } else { /* TLS_ST_APP */
+      if (type == 23) {
+        static uint8_t srv_scratch[16384];
+        int pl = tls_srv_gcm_open(23, body, rlen, srv_scratch);
+        if (pl < 0) {
+          log_writestring("[TLS-SRV] app-data tag mismatch\n");
+          tcp_close(pcb);
+          tls_server_reset();
+          stop = 1;
+        } else {
+          uint32_t room = (tls_srv.plain_len < TLS_SRV_HS_MAX)
+                              ? TLS_SRV_HS_MAX - tls_srv.plain_len
+                              : 0;
+          uint32_t take = (uint32_t)pl < room ? (uint32_t)pl : room;
+          for (uint32_t i = 0; i < take; i++)
+            tls_srv.plain[tls_srv.plain_len + i] = srv_scratch[i];
+          tls_srv.plain_len += take;
+          if (srv_http_ready()) {
+            uint32_t pl2 = tls_srv.plain_len;
+            tls_srv.plain_len = 0;
+            pcb->app_rx_len = 0; /* response closes the connection */
+            extern void http_handle_connection(struct tcp_pcb *pcb,
+                                               const uint8_t *data, int len);
+            log_writestring("[TLS-SRV] HTTPS request dispatch (");
+            log_write_u32(pl2);
+            log_writestring(" bytes)\n");
+            http_handle_connection(pcb, tls_srv.plain, (int)pl2);
+            stop = 1;
+          }
+        }
+      } else if (type == 21) { /* close_notify / alert */
+        uint8_t pt[16];
+        if (rlen == 26)
+          tls_srv_gcm_open(21, body, rlen, pt);
+        tcp_close(pcb);
+        tls_server_reset();
+        stop = 1;
+      } else if (type == 22) {
+        /* post-handshake encrypted handshake (session tickets): ignore.
+         * If the tag fails this was plaintext — a NEW connection's
+         * ClientHello arriving while stale state from a previous session
+         * was still installed. Reset and fall through to a fresh
+         * handshake below (otherwise every subsequent HTTPS connection
+         * hangs: the CH is silently swallowed). */
+        uint8_t pt[256];
+        if (tls_srv_gcm_open(22, body, rlen, pt) >= 0)
+          break; /* genuinely encrypted: ignore */
+        tls_server_reset();
+        if (rlen >= 4 && body[0] == 1) {
+          uint32_t ml2 =
+              ((uint32_t)body[1] << 16) | ((uint32_t)body[2] << 8) | body[3];
+          if (4 + ml2 > rlen)
+            break;
+          log_writestring("[TLS-SRV] ClientHello (fresh reset)\n");
+          srv_hs_append(body, 4 + ml2);
+          if (srv_parse_ch(body + 4, ml2) && srv_send_flight(pcb)) {
+            tls_srv.state = TLS_ST_CKE;
+          } else {
+            srv_fatal(pcb, 40);
+            stop = 1;
+          }
+        } else {
+          srv_fatal(pcb, 10);
+          stop = 1;
+        }
+      }
+    }
+    off += 5 + rlen;
+  }
+  if (off > 0 && !stop) {
+    /* consume processed records, keep partial trailing bytes */
+    uint16_t remaining = (uint16_t)(len - off);
+    for (uint16_t i = 0; i < remaining; i++)
+      pcb->app_rx_buf[i] = pcb->app_rx_buf[off + i];
+    pcb->app_rx_len = remaining;
+  }
+}
+
+/* encrypted application-data write for http.c (port-443 connections) */
+int tls_server_write(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
+  if (!tls_srv.established)
+    return -1;
+  uint16_t off = 0;
+  while (off < len) {
+    uint16_t n = (uint16_t)(len - off);
+    if (n > 16384)
+      n = 16384;
+    if (!tls_srv_send_record(pcb, 23, data + off, n))
+      return -1;
+    off += n;
+  }
+  return 0;
 }

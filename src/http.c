@@ -153,6 +153,21 @@ void http_init(void) {
   pcb->state = TCP_LISTEN;
 
   log_writestring("[HTTP] Server listening on port 80\n");
+
+  // HTTPS listener on port 443 (TLS 1.2 server in src/tls.c)
+  struct tcp_pcb *tpcb = tcp_get_free_pcb();
+  if (!tpcb) {
+    log_writestring("[HTTP] ERROR: No free PCBs for TLS listener\n");
+  } else {
+    tpcb->local_port = HTTPS_PORT;
+    tpcb->local_ip = 0;
+    tpcb->state = TCP_LISTEN;
+    log_writestring("[HTTP] TLS server listening on port 443\n");
+  }
+  {
+    extern void tls_server_reset(void);
+    tls_server_reset();
+  }
 }
 
 // Parse HTTP request
@@ -264,6 +279,33 @@ void http_send_response(struct tcp_pcb *pcb, struct http_response *resp) {
   (void)resp;
 }
 
+/* Output helpers: HTTPS connections (local_port 443) tunnel every
+ * response byte through the TLS record layer (src/tls.c server side);
+ * plain HTTP goes out raw. */
+static int http_is_tls_conn(struct tcp_pcb *pcb) {
+  return pcb && pcb->local_port == HTTPS_PORT;
+}
+
+static void http_out_data(struct tcp_pcb *pcb, const uint8_t *data,
+                          uint16_t len) {
+  extern int tls_server_write(struct tcp_pcb *pcb, const uint8_t *data,
+                              uint16_t len);
+  if (http_is_tls_conn(pcb))
+    tls_server_write(pcb, data, len);
+  else
+    tcp_send_data(pcb, data, len);
+}
+
+static void http_out_body(struct tcp_pcb *pcb, const uint8_t *data,
+                          uint16_t len) {
+  extern int tls_server_write(struct tcp_pcb *pcb, const uint8_t *data,
+                              uint16_t len);
+  if (http_is_tls_conn(pcb))
+    tls_server_write(pcb, data, len);
+  else
+    tcp_send(pcb, data, len);
+}
+
 /* Send a complete response with correct Content-Length and close the
  * connection. Without Content-Length + FIN, clients block waiting for the
  * body to end. */
@@ -295,11 +337,11 @@ static void http_send_page_buf(struct tcp_pcb *pcb, const char *status,
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
 
-  tcp_send_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
+  http_out_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
   if (blen > 0)
     /* tcp_send segments to MSS; tcp_send_data silently drops bodies that
      * would exceed the e1000 frame limit (one un-segmented frame). */
-    tcp_send(pcb, (const uint8_t *)body, (uint16_t)blen);
+    http_out_body(pcb, (const uint8_t *)body, (uint16_t)blen);
   tcp_close(pcb);
 }
 
@@ -356,7 +398,7 @@ static void http_send_redirect(struct tcp_pcb *pcb, const char *location) {
   s = tail;
   while (*s && n < (int)sizeof(hdr) - 1)
     hdr[n++] = *s++;
-  tcp_send_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
+  http_out_data(pcb, (const uint8_t *)hdr, (uint16_t)n);
   tcp_close(pcb);
 }
 

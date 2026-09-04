@@ -4,7 +4,7 @@
 #   start  (default) launch the guest if not already running (idempotent)
 #   status           print "running" or "stopped"
 #   stop             terminate the guest
-# Ports on host: 9022 -> guest ssh (22), 9080 -> guest http (80)
+# Ports on host: 9022 -> guest ssh (22), 9080 -> guest http (80), 9443 -> guest https (443)
 # Login: user / pass        Web preview: http://127.0.0.1:9080/
 cd /Users/ageorge/AJOS || exit 1
 
@@ -24,7 +24,7 @@ case "${1:-start}" in
     nohup "$QEMU" -m 512M -boot "${AJOS_BOOT_ORDER:-a}" \
       -drive file=build/ajos.img,format=raw,if=floppy \
       -drive file=build/data.img,format=raw,if=ide \
-      -netdev user,id=n0,hostfwd=tcp::9022-10.0.2.15:22,hostfwd=tcp::9080-10.0.2.15:80 \
+      -netdev user,id=n0,hostfwd=tcp::9022-10.0.2.15:22,hostfwd=tcp::9080-10.0.2.15:80,hostfwd=tcp::9443-10.0.2.15:443 \
       -device e1000,netdev=n0 -nographic -monitor none -serial stdio -no-reboot \
       < build/ttyin.fifo >> build/console.log 2>&1 &
     echo "AJOS VM launched (pid $!)"
@@ -42,7 +42,7 @@ case "${1:-start}" in
     exec "$QEMU" -m 512M -boot "${AJOS_BOOT_ORDER:-a}" \
       -drive file=build/ajos.img,format=raw,if=floppy \
       -drive file=build/data.img,format=raw,if=ide \
-      -netdev user,id=n0,hostfwd=tcp::9022-10.0.2.15:22,hostfwd=tcp::9080-10.0.2.15:80 \
+      -netdev user,id=n0,hostfwd=tcp::9022-10.0.2.15:22,hostfwd=tcp::9080-10.0.2.15:80,hostfwd=tcp::9443-10.0.2.15:443 \
       -device e1000,netdev=n0 -nographic -monitor none -serial stdio -no-reboot \
       < build/ttyin.fifo
     ;;

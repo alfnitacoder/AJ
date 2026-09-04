@@ -241,7 +241,7 @@ $(HTTP_OBJ): $(HTTP_SRC)
 $(BROWSER_OBJ): $(SRC_DIR)/browser.c $(INC_DIR)/net.h $(INC_DIR)/keyboard.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(TLS_OBJ): $(SRC_DIR)/tls.c $(INC_DIR)/crypto.h
+$(TLS_OBJ): $(SRC_DIR)/tls.c $(INC_DIR)/crypto.h $(INC_DIR)/tls_cert.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(DHCPD_OBJ): $(DHCPD_SRC)

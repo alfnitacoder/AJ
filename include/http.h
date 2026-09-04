@@ -6,6 +6,9 @@
 // HTTP server port
 #define HTTP_PORT 80
 
+// HTTPS (TLS) server port — served by the TLS 1.2 server in src/tls.c
+#define HTTPS_PORT 443
+
 // HTTP methods
 #define HTTP_METHOD_GET 1
 #define HTTP_METHOD_POST 2

@@ -2081,6 +2081,24 @@ static void get_default_rsa_key(rsa_key *key)
   }
 }
 
+// TLS (HTTPS server): PKCS#1 v1.5 SHA-256 signature with the host RSA key.
+// Same key the SSH server signs with, so one identity covers both services.
+// hash: 32-byte SHA-256 digest. sig_out: 256-byte big-endian signature.
+// Returns RSA_KEY_SIZE (256) on success, 0 on failure.
+int tls_rsa_sign_sha256(const uint8_t *hash, uint8_t *sig_out)
+{
+  rsa_key *key = (rsa_key *)kmalloc(sizeof(rsa_key));
+  if (!key)
+  {
+    log_writestring("[CRYPTO] ERROR: kmalloc failed for tls_rsa_sign_sha256\n");
+    return 0;
+  }
+  get_default_rsa_key(key);
+  int len = rsa_sign(hash, 32, "sha256", key, sig_out);
+  kfree(key);
+  return len;
+}
+
 // Get RSA public key blob in SSH wire format
 // Format: string "ssh-rsa" || mpint e || mpint n
 // Returns length of blob written to output, or 0 on error
