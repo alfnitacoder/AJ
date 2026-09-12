@@ -13,6 +13,10 @@ typedef unsigned int   u32;
 typedef unsigned long long u64;
 
 /* ---- externs from intr64.c / pmm64.c ---- */
+extern void vm64_init(void);
+extern void heap64_init(void);
+extern void *kmalloc64(unsigned long long n);
+extern void kfree64(void *p);
 extern void idt64_init(void);
 extern void timer64_init(void);
 extern unsigned long long timer64_ticks(void);
@@ -100,8 +104,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 2\n");
-    serial_puts(" (IDT + exceptions, PIC/PIT timer, PMM frames)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 3\n");
+    serial_puts(" (VM: 4KB pages + NX, kernel heap, kmalloc)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -165,7 +169,35 @@ void kernel_main64(void)
     serial_put_dec(timer64_ticks());
     serial_puts("\n");
 
-    serial_puts("\n Milestone 2 complete. Next: 64-bit paging/heap, then drivers.\n");
+    /* ---- M3: virtual memory + kernel heap ---- */
+    vm64_init();
+    heap64_init();
+    {
+        u8 *p1 = (u8 *)kmalloc64(1000);
+        u8 *p2 = (u8 *)kmalloc64(1048576u);   /* 1MB: spans multiple PDs */
+        u8 *p3 = (u8 *)kmalloc64(65536);
+        u64 i, bad = 0;
+        void *p4;
+        for (i = 0; i < 1000; i++) p1[i] = (u8)(i & 0xFF);
+        for (i = 0; i < 1048576u; i++) p2[i] = (u8)((i * 7) & 0xFF);
+        for (i = 0; i < 1000; i++) if (p1[i] != (u8)(i & 0xFF)) bad++;
+        for (i = 0; i < 1048576u; i++) if (p2[i] != (u8)((i * 7) & 0xFF)) bad++;
+        serial_puts(" kmalloc 1KB+1MB fill/verify: ");
+        serial_puts(bad ? "FAIL" : "OK");
+        serial_puts("\n");
+        kfree64(p1);
+        kfree64(p3);
+        kfree64(p2);
+        p4 = kmalloc64(2097152u);              /* needs the coalesced space */
+        serial_puts(" kmalloc 2MB after free+coalesce: ");
+        serial_puts(p4 ? "OK" : "FAIL");
+        serial_puts(" at ");
+        serial_put_hex((u64)p4);
+        serial_puts("\n");
+        kfree64(p4);
+    }
+
+    serial_puts("\n Milestone 3 complete. Next: drivers (e1000/ATA/FAT).\n");
     serial_puts("================================================\n");
 
     for (;;)

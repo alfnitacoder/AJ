@@ -22,12 +22,14 @@ KERNEL64_ENTRY_SRC = $(ASM_DIR)/kernel_entry64.asm
 KERNEL64_SRC = $(SRC_DIR)/kernel64.c
 INTR64_SRC = $(SRC_DIR)/intr64.c
 PMM64_SRC = $(SRC_DIR)/pmm64.c
+VM64_SRC = $(SRC_DIR)/vm64.c
 ISR64_SRC = $(ASM_DIR)/isr64.asm
 BOOT64_OBJ = $(BUILD_DIR)/boot64.bin
 KERNEL64_ENTRY_OBJ = $(BUILD_DIR)/kernel_entry64.o
 ISR64_OBJ = $(BUILD_DIR)/isr64.o
 INTR64_OBJ = $(BUILD_DIR)/intr64.o
 PMM64_OBJ = $(BUILD_DIR)/pmm64.o
+VM64_OBJ = $(BUILD_DIR)/vm64.o
 KERNEL64_ELF = $(BUILD_DIR)/kernel64.elf
 KERNEL64_BIN = $(BUILD_DIR)/kernel64.bin
 OS64_IMG = $(BUILD_DIR)/ajos64.img
@@ -145,7 +147,10 @@ $(INTR64_OBJ): $(INTR64_SRC)
 $(PMM64_OBJ): $(PMM64_SRC)
 	$(CC) $(CFLAGS64) -c $< -o $@
 
-$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ)
+$(VM64_OBJ): $(VM64_SRC)
+	$(CC) $(CFLAGS64) -c $< -o $@
+
+$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ)
 	$(LD) $(LDFLAGS64) -o $@ $^
 
 $(KERNEL64_BIN): $(KERNEL64_ELF)
@@ -165,7 +170,7 @@ run64: $(OS64_IMG)
 
 .PHONY: test64
 test64: $(OS64_IMG)
-	@$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 8; kill $$QPID 2>/dev/null; wait $$QPID 2>/dev/null; grep -q "LONG MODE MILESTONE 2" build/serial64.log && echo "TEST64 PASS: long mode banner on serial" || (echo "TEST64 FAIL"; exit 1)
+	@$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 8; kill $$QPID 2>/dev/null; wait $$QPID 2>/dev/null; grep -q "LONG MODE MILESTONE 3" build/serial64.log && echo "TEST64 PASS: long mode banner on serial" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022
