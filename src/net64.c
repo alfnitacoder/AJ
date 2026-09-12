@@ -62,6 +62,11 @@ static u32 gw_ip   = 0x0202000Au;  /* 10.0.2.2  */
 static u8  my_mac[6];
 static u8  bcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
+extern void tcp64_rx(const u8 *ip, u16 iplen);
+
+u32 net64_my_ip(void)   { return my_ip; }
+u32 net64_gw_ip(void)   { return gw_ip; }
+
 /* ARP cache: one entry (the gateway) is all we need. */
 static u32 arp_ip;
 static u8  arp_mac[6];
@@ -170,6 +175,11 @@ static void ip_rx(const u8 *frame, u16 len)
     if (len < 34) return;
     iplen = (u16)(((ip[2] << 8) | ip[3]));
     src = (u32)ip[12] | ((u32)ip[13] << 8) | ((u32)ip[14] << 16) | ((u32)ip[15] << 24);
+    if (ip[9] == 6) {
+        extern void tcp64_rx(const u8 *, u16);
+        tcp64_rx(ip, iplen);
+        return;
+    }
     if (ip[9] == 1) {
         /* ICMP: the type lives AFTER the IP header (ihl), not at ip[0]. */
         u16 ihl = (u16)((ip[0] & 0xF) * 4);
@@ -224,6 +234,14 @@ static void arp_rx(const u8 *frame, u16 len)
             arp_tx(2, frame + 6, spa);                 /* unicast reply */
         }
     }
+}
+
+int net64_arp_ready(void){ return arp_valid; }
+
+int ip64_send_tcp(u32 dst, const u8 *seg, u16 seglen)
+{
+    if (!arp_valid) return -1;
+    return ip_tx(dst, 6, seg, seglen, arp_mac);
 }
 
 void net64_poll(void)

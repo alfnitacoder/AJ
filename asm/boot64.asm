@@ -57,6 +57,15 @@ start:
     dec si
     jnz .lk
 
+    ; Config sector (LBA 900) -> 0x74000: test IP target, 4 bytes LSB-first
+    ; (0 = default 10.0.2.2). Above the 800-sector staging, below VGA.
+    mov ax, 0x7400
+    mov es, ax
+    xor bx, bx
+    mov si, 1
+    mov ax, 900
+    call rs
+
     cli
     lgdt [gdt_descriptor]
     mov eax, cr0

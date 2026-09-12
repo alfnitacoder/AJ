@@ -25,6 +25,7 @@ PMM64_SRC = $(SRC_DIR)/pmm64.c
 VM64_SRC = $(SRC_DIR)/vm64.c
 E1000_64_SRC = $(SRC_DIR)/e1000_64.c
 NET64_SRC = $(SRC_DIR)/net64.c
+TCP64_SRC = $(SRC_DIR)/tcp64.c
 ISR64_SRC = $(ASM_DIR)/isr64.asm
 BOOT64_OBJ = $(BUILD_DIR)/boot64.bin
 KERNEL64_ENTRY_OBJ = $(BUILD_DIR)/kernel_entry64.o
@@ -34,6 +35,7 @@ PMM64_OBJ = $(BUILD_DIR)/pmm64.o
 VM64_OBJ = $(BUILD_DIR)/vm64.o
 E1000_64_OBJ = $(BUILD_DIR)/e1000_64.o
 NET64_OBJ = $(BUILD_DIR)/net64.o
+TCP64_OBJ = $(BUILD_DIR)/tcp64.o
 KERNEL64_ELF = $(BUILD_DIR)/kernel64.elf
 KERNEL64_BIN = $(BUILD_DIR)/kernel64.bin
 OS64_IMG = $(BUILD_DIR)/ajos64.img
@@ -160,7 +162,10 @@ $(E1000_64_OBJ): $(E1000_64_SRC)
 $(NET64_OBJ): $(NET64_SRC)
 	$(CC) $(CFLAGS64) -c $< -o $@
 
-$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ)
+$(TCP64_OBJ): $(TCP64_SRC)
+	$(CC) $(CFLAGS64) -c $< -o $@
+
+$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ) $(TCP64_OBJ)
 	$(LD) $(LDFLAGS64) -o $@ $^
 
 $(KERNEL64_BIN): $(KERNEL64_ELF)
@@ -181,7 +186,10 @@ run64: $(OS64_IMG)
 
 .PHONY: test64
 test64: $(OS64_IMG)
-	@$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 10; kill $$QPID 2>/dev/null; wait $$QPID 2>/dev/null; grep -q "LONG MODE MILESTONE 4" build/serial64.log && echo "TEST64 PASS: long mode banner on serial" || (echo "TEST64 FAIL"; exit 1)
+	@mkdir -p build/htdoc
+	@printf '<html><body>AJOS64-HTTP-TEST-PAGE</body></html>\n' > build/htdoc/index.html
+	@pkill -f "http.server 8130" 2>/dev/null; sleep 1; true
+	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 15; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "LONG MODE MILESTONE 5" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022

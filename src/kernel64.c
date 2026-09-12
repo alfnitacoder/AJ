@@ -19,6 +19,8 @@ extern int net64_ping(unsigned int dst, unsigned short seq);
 extern void net64_poll(void);
 extern void e1000_64_init(void);
 extern void e1000_64_debug_dump(void);
+extern void tcp64_init(void);
+extern int tcp64_http_get(unsigned int ip, unsigned short port, const char *path, unsigned short *status, unsigned short *len);
 extern int e1000_64_present(void);
 extern void vm64_init(void);
 extern void heap64_init(void);
@@ -111,8 +113,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 4\n");
-    serial_puts(" (e1000 polling NIC + ARP/IP4/ICMP ping)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 5\n");
+    serial_puts(" (TCP + HTTP GET to the host)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -236,7 +238,34 @@ void kernel_main64(void)
         serial_puts("/4\n");
     }
 
-    serial_puts("\n Milestone 4 complete. Next: TCP/UDP, then ATA/FAT.\n");
+    /* ---- M5: TCP + HTTP GET to the host (slirp 10.0.2.2 alias) ---- */
+    tcp64_init();
+    if (e1000_64_present()) {
+        unsigned short code = 0, blen = 0;
+        u32 target = *(volatile u32 *)0x74000u;   /* config sector */
+        if (!target) target = 0x0202000Au;        /* default 10.0.2.2 */
+        serial_puts(" HTTP target = ");
+        serial_put_dec(target & 0xFF); serial_putc('.');
+        serial_put_dec((target >> 8) & 0xFF); serial_putc('.');
+        serial_put_dec((target >> 16) & 0xFF); serial_putc('.');
+        serial_put_dec((target >> 24) & 0xFF);
+        serial_puts(":8130\n");
+        int st = tcp64_http_get(target, 8130, "/", &code, &blen);
+        serial_puts(" HTTP GET / : ");
+        if (st > 0) {
+            serial_puts("status=");
+            serial_put_dec(code);
+            serial_puts(" HTTP 200 TEST PASS bytes=");
+            serial_put_dec(blen);
+            serial_puts("\n");
+        } else {
+            serial_puts("FAILED err=");
+            serial_put_dec((u64)(-st));
+            serial_puts("\n");
+        }
+    }
+
+    serial_puts("\n Milestone 5 complete. Next: ATA/FAT storage.\n");
     serial_puts("================================================\n");
 
     for (;;)
