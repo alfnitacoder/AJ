@@ -193,6 +193,42 @@ static int name_eq83(const u8 *entry, const char *name)
     return 1;
 }
 
+/* List the root directory over serial: names, attr, size. */
+void fat64_list(void)
+{
+    u32 e;
+    int shown = 0;
+    for (e = 0; e + 32 <= root_cache_bytes; e += 32) {
+        u8 *d = root_cache + e;
+        if (d[0] == 0x00) break;
+        if (d[0] == 0xE5 || d[11] == 0x0F) continue;
+        if (d[11] & 0x08) continue;             /* volume label */
+        {
+            int i;
+            for (i = 0; i < 8; i++) {
+                u8 ch = d[i];
+                if (ch != ' ') ser_putc((ch >= 'a' && ch <= 'z') ? ch - 32 : ch);
+            }
+            if (d[8] != ' ') {
+                ser_putc('.');
+                for (i = 8; i < 11; i++) {
+                    u8 ch = d[i];
+                    if (ch != ' ') ser_putc((ch >= 'a' && ch <= 'z') ? ch - 32 : ch);
+                }
+            }
+            if (d[11] & 0x10) {
+                ser_puts("/");
+            } else {
+                ser_putc(' ');
+                ser_put_dec(rd32(d + 28));
+            }
+            ser_puts("\n");
+            shown++;
+        }
+    }
+    if (!shown) ser_puts(" (empty)\n");
+}
+
 /* Find + read the first `cap` bytes of /NAME.EXT from the root dir.
  * Returns the byte count copied, or -1 if not found. */
 int fat64_read_file(const char *name, void *out, u32 cap)

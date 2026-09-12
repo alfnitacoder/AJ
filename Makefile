@@ -28,6 +28,7 @@ NET64_SRC = $(SRC_DIR)/net64.c
 TCP64_SRC = $(SRC_DIR)/tcp64.c
 ATA64_SRC = $(SRC_DIR)/ata64.c
 FAT64_SRC = $(SRC_DIR)/fat64.c
+SH64_SRC = $(SRC_DIR)/sh64.c
 ISR64_SRC = $(ASM_DIR)/isr64.asm
 BOOT64_OBJ = $(BUILD_DIR)/boot64.bin
 KERNEL64_ENTRY_OBJ = $(BUILD_DIR)/kernel_entry64.o
@@ -40,6 +41,7 @@ NET64_OBJ = $(BUILD_DIR)/net64.o
 TCP64_OBJ = $(BUILD_DIR)/tcp64.o
 ATA64_OBJ = $(BUILD_DIR)/ata64.o
 FAT64_OBJ = $(BUILD_DIR)/fat64.o
+SH64_OBJ = $(BUILD_DIR)/sh64.o
 KERNEL64_ELF = $(BUILD_DIR)/kernel64.elf
 KERNEL64_BIN = $(BUILD_DIR)/kernel64.bin
 OS64_IMG = $(BUILD_DIR)/ajos64.img
@@ -175,7 +177,10 @@ $(ATA64_OBJ): $(ATA64_SRC)
 $(FAT64_OBJ): $(FAT64_SRC)
 	$(CC) $(CFLAGS64) -c $< -o $@
 
-$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ) $(TCP64_OBJ) $(ATA64_OBJ) $(FAT64_OBJ)
+$(SH64_OBJ): $(SH64_SRC)
+	$(CC) $(CFLAGS64) -c $< -o $@
+
+$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ) $(TCP64_OBJ) $(ATA64_OBJ) $(FAT64_OBJ) $(SH64_OBJ)
 	$(LD) $(LDFLAGS64) -o $@ $^
 
 $(KERNEL64_BIN): $(KERNEL64_ELF)
@@ -203,7 +208,7 @@ test64: $(OS64_IMG)
 	@mkdir -p build/data64_staging/data
 	@printf 'AJOS64-DISK-READS-OK\n' > build/data64_staging/data/HELLO.TXT
 	@if [ ! -f build/data64.img ] || [ build/data64_staging/data/HELLO.TXT -nt build/data64.img ]; then cd build/data64_staging && python3 ../../tools/mkfat12.py ../data64.img --size-mb 4 >/dev/null 2>&1; fi
-	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 15; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "LONG MODE MILESTONE 6" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
+	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 15; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "LONG MODE MILESTONE 7" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && grep -q "sh64 ready" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022

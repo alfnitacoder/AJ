@@ -22,6 +22,7 @@ extern void e1000_64_debug_dump(void);
 extern int ata64_init(void);
 extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
+extern void sh64_run(void) __attribute__((noreturn));
 extern void tcp64_init(void);
 extern int tcp64_http_get(unsigned int ip, unsigned short port, const char *path, unsigned short *status, unsigned short *len);
 extern int e1000_64_present(void);
@@ -116,8 +117,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 6\n");
-    serial_puts(" (ATA PIO + FAT12: reading real files)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 7\n");
+    serial_puts(" (serial shell: ls cat ping http mem)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -295,9 +296,8 @@ void kernel_main64(void)
         }
     }
 
-    serial_puts("\n Milestone 6 complete. Next: shell/AJLang/web port.\n");
+    serial_puts("\n Milestone 7: interactive shell.\n");
     serial_puts("================================================\n");
+    sh64_run();   /* never returns */
 
-    for (;;)
-        __asm__ __volatile__("sti; hlt");
 }
