@@ -12,8 +12,19 @@ BUILD_DIR = build
 CFLAGS = -m32 -march=i386 -mno-sse -mno-sse2 -mno-mmx -mno-80387 -msoft-float -fno-pie -fno-stack-protector -nostdlib -nostdinc -fno-builtin -fno-pic -I$(INC_DIR)
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T kernel/linker.ld
-# LLM uses x87 FPU (no -msoft-float) - toolchain lacks i386 soft-float libgcc
-LLM_CFLAGS = -m32 -march=i386 -mno-sse -mno-sse2 -mno-mmx -fno-pie -fno-stack-protector -nostdlib -nostdinc -fno-builtin -fno-pic -I$(INC_DIR)
+
+# ---- x86-64 (long mode) port: parallel build, does not touch the i386 image ----
+CFLAGS64 = -m64 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-80387 -msoft-float -fno-pie -fno-stack-protector -nostdlib -nostdinc -fno-builtin -fno-pic -I$(INC_DIR)
+ASFLAGS64 = -f elf64
+LDFLAGS64 = -m elf_x86_64 -T kernel64/linker64.ld
+BOOT64_SRC = $(ASM_DIR)/boot64.asm
+KERNEL64_ENTRY_SRC = $(ASM_DIR)/kernel_entry64.asm
+KERNEL64_SRC = $(SRC_DIR)/kernel64.c
+BOOT64_OBJ = $(BUILD_DIR)/boot64.bin
+KERNEL64_ENTRY_OBJ = $(BUILD_DIR)/kernel_entry64.o
+KERNEL64_ELF = $(BUILD_DIR)/kernel64.elf
+KERNEL64_BIN = $(BUILD_DIR)/kernel64.bin
+OS64_IMG = $(BUILD_DIR)/ajos64.img
 
 BOOT_SRC = $(ASM_DIR)/boot.asm
 KERNEL_ENTRY_SRC = $(ASM_DIR)/kernel_entry.asm
@@ -109,6 +120,37 @@ OS_IMG = $(BUILD_DIR)/ajos.img
 RUN_OS_IMG = $(BUILD_DIR)/ajos.run.img
 DATA_IMG = $(BUILD_DIR)/data.img
 ISO_IMG = $(BUILD_DIR)/ajos.iso
+
+$(BOOT64_OBJ): $(BOOT64_SRC)
+	$(AS) -f bin $< -o $@
+
+$(KERNEL64_ENTRY_OBJ): $(KERNEL64_ENTRY_SRC)
+	$(AS) $(ASFLAGS64) $< -o $@
+
+$(BUILD_DIR)/kernel64.o: $(KERNEL64_SRC)
+	$(CC) $(CFLAGS64) -c $< -o $@
+
+$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o
+	$(LD) $(LDFLAGS64) -o $@ $^
+
+$(KERNEL64_BIN): $(KERNEL64_ELF)
+	$(OBJCOPY) -O binary $< $@
+
+# Bootable 1.44MB floppy image: boot64 sector + 64-bit kernel at LBA 1.
+$(OS64_IMG): $(BOOT64_OBJ) $(KERNEL64_BIN)
+	dd if=/dev/zero of=$@ bs=512 count=2880 2>/dev/null
+	dd if=$(BOOT64_OBJ) of=$@ bs=512 conv=notrunc seek=0 2>/dev/null
+	dd if=$(KERNEL64_BIN) of=$@ bs=512 conv=notrunc seek=1 2>/dev/null
+
+QEMU64_RUN := $(if $(shell command -v stdbuf 2>/dev/null),stdbuf -oL ,)qemu-system-x86_64
+
+.PHONY: run64
+run64: $(OS64_IMG)
+	$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy -no-reboot -monitor none -serial stdio -display none
+
+.PHONY: test64
+test64: $(OS64_IMG)
+	@$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 8; kill $$QPID 2>/dev/null; wait $$QPID 2>/dev/null; grep -q "LONG MODE MILESTONE 1" build/serial64.log && echo "TEST64 PASS: long mode banner on serial" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022
@@ -313,36 +355,13 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	@echo "Creating kernel.bin..."
 	$(OBJCOPY) -O binary $< $@
 
-# Optional LLM assets (not used by default `make` / `make run` — use `make data/STORIES.BIN` if needed).
-data/STORIES.BIN:
-	@mkdir -p data
-	@echo "Downloading Stories-260K model..."
-	curl -L https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K/stories260K.bin -o data/STORIES.BIN
-
-data/TOK512.BIN:
-	@mkdir -p data
-	@echo "Downloading Stories-260K tokenizer..."
-	curl -L https://huggingface.co/karpathy/tinyllamas/resolve/main/stories260K/tok512.bin -o data/TOK512.BIN
-
-data/STORIES42.BIN:
-	@mkdir -p data
-	@echo "Downloading Stories-42M model (160MB)..."
-	curl -L https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin -o data/STORIES42.BIN
-
-data/TOK32K.BIN:
-	@mkdir -p data
-	@echo "Downloading standard tokenizer (32K vocab)..."
-	curl -L https://huggingface.co/karpathy/tinyllamas/resolve/main/tokenizer.bin -o data/TOK32K.BIN
-
-# Boot floppy: no LLM models (fast build). Optional: data/STORIES*.BIN targets below for manual use.
+# Boot floppy.
 $(OS_IMG): $(BOOT_OBJ) $(KERNEL_BIN) $(USER_PROGS) tools/mkfat12.py
 	@mkdir -p data
-	@if [ -f examples/hello.aj ]; then cp examples/hello.aj data/; fi
-	@if [ ! -f data/hello.aj ]; then echo 'print "test"' > data/hello.aj; fi
-	@if [ -f examples/dnscheck.aj ]; then cp examples/dnscheck.aj data/; fi
-	@if [ -f examples/str_demo.aj ]; then cp examples/str_demo.aj data/; fi
-	cp $(USER_PROGS) data/
-	python3 tools/mkfat12.py $@ --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN)
+	@rm -f data/FORKDEMO.BIN data/CHILD.BIN
+	cp $(FORKDEMO_BIN) data/forkdemo.bin
+	cp $(CHILD_BIN) data/child.bin
+	python3 tools/mkfat12.py $@ --boot $(BOOT_OBJ) --kernel $(KERNEL_BIN) --netcfg data/NETWORK.CFG
 
 # Secondary IDE disk: small empty FAT (no 256MB model copy). Built from empty dir so data/ is not scanned.
 $(DATA_IMG): tools/mkfat12.py $(wildcard opt/*.aj) $(wildcard webapp/*.aj) $(wildcard www/*.html)
@@ -590,7 +609,7 @@ test-sshfs:
 	./tools/ajos-cursor-remote/test-sshfs.sh
 
 # End-to-end fork/execve/waitpid test: builds the serial image, boots QEMU,
-# logs in over serial, runs FORKDEMO.BIN via run3 (foreground + background).
+# logs in over serial, runs bin/forkdemo.bin via run3 (foreground + background).
 test-fork: force-clean-serial
 	-pkill -9 qemu-system-i386 2>/dev/null || true
 	@sleep 1
