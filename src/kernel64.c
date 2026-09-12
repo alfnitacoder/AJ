@@ -19,6 +19,9 @@ extern int net64_ping(unsigned int dst, unsigned short seq);
 extern void net64_poll(void);
 extern void e1000_64_init(void);
 extern void e1000_64_debug_dump(void);
+extern int ata64_init(void);
+extern int fat64_init(void);
+extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern void tcp64_init(void);
 extern int tcp64_http_get(unsigned int ip, unsigned short port, const char *path, unsigned short *status, unsigned short *len);
 extern int e1000_64_present(void);
@@ -113,8 +116,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 5\n");
-    serial_puts(" (TCP + HTTP GET to the host)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 6\n");
+    serial_puts(" (ATA PIO + FAT12: reading real files)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -265,7 +268,34 @@ void kernel_main64(void)
         }
     }
 
-    serial_puts("\n Milestone 5 complete. Next: ATA/FAT storage.\n");
+    /* ---- M6: ATA + FAT storage ---- */
+    if (ata64_init() == 0 && fat64_init() == 0) {
+        static char filebuf[4096];
+        int n = fat64_read_file("HELLO.TXT", filebuf, sizeof(filebuf) - 1);
+        serial_puts(" HELLO.TXT: ");
+        if (n > 0) {
+            int i;
+            filebuf[n] = 0;
+            serial_puts("READ OK, content: \"");
+            for (i = 0; i < n && i < 40; i++) serial_putc(filebuf[i]);
+            serial_puts("\"\n");
+            if (n >= 19) {
+                char ok = 1;
+                const char *expect = "AJOS64-DISK-READS-OK";
+                int i2;
+                for (i2 = 0; i2 < 19; i2++)
+                    if (filebuf[i2] != expect[i2]) ok = 0;
+                serial_puts(" DISK READ TEST: ");
+                serial_puts(ok ? "PASS\n" : "CONTENT MISMATCH\n");
+            }
+        } else {
+            serial_puts("NOT FOUND (err=");
+            serial_put_dec((u64)(-n));
+            serial_puts(")\n");
+        }
+    }
+
+    serial_puts("\n Milestone 6 complete. Next: shell/AJLang/web port.\n");
     serial_puts("================================================\n");
 
     for (;;)
