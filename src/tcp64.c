@@ -352,6 +352,28 @@ int tcp64_http_get(u32 ip, u16 port, const char *path, u16 *status_out, u16 *len
     }
 }
 
+/* Full GET returning the response BODY (after the blank line) in out.
+ * Returns the HTTP status code, or a negative error. */
+int tcp64_http_get_body(u32 ip, u16 port, const char *path, char *out, u16 cap)
+{
+    unsigned short code = 0, blen = 0;
+    int total = tcp64_http_get(ip, port, path, &code, &blen);
+    int i;
+    if (total < 12) return total;
+    for (i = 0; i + 3 < total; i++) {
+        if (t_rxbuf[i] == '\r' && t_rxbuf[i + 1] == '\n' &&
+            t_rxbuf[i + 2] == '\r' && t_rxbuf[i + 3] == '\n') {
+            int body = total - (i + 4);
+            int j;
+            if (body > (int)cap - 1) body = cap - 1;
+            for (j = 0; j < body; j++) out[j] = t_rxbuf[i + 4 + j];
+            out[body > 0 ? body : 0] = 0;
+            return (int)code;
+        }
+    }
+    return (int)code;
+}
+
 void tcp64_init(void)
 {
     ser_puts(" TCP-64: single-connection stack ready (retransmit on)\n");

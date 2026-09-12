@@ -14,6 +14,8 @@ typedef unsigned long long u64;
 
 extern void *kmalloc64(unsigned long long n);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
+extern int tcp64_http_get_body(unsigned int ip, unsigned short port,
+                               const char *path, char *out, unsigned short cap);
 
 #define COM1 0x3F8
 static inline void outb(u16 port, u8 val)
@@ -124,7 +126,7 @@ static void lex(const char *src)
             i += 2;
             continue;
         }
-        if (c == ';' || c == '(' || c == ')' || c == '{' || c == '}' ||
+        if (c == ';' || c == '(' || c == ')' || c == '{' || c == '}' || c == ',' ||
             c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
             c == '=' || c == '<' || c == '>') {
             toks[ntok].kind = 3;
@@ -142,13 +144,15 @@ static void lex(const char *src)
 }
 
 /* ---- AST ---- */
-typedef enum { N_NUM, N_STR, N_VAR, N_BIN, N_STRLEN, N_STRCAT, N_NUMCVT, N_FREAD } ntype;
+typedef enum { N_NUM, N_STR, N_VAR, N_BIN, N_STRLEN, N_STRCAT, N_NUMCVT,
+               N_FREAD, N_HTTPGET, N_STRFIND, N_STRSUB } ntype;
 
 typedef struct node {
     ntype t;
     long num;
     char *str;
     struct node *l, *r;
+    struct node *a1, *a2;
 } node;
 
 typedef struct stmt {
@@ -209,7 +213,7 @@ static node *node_new(ntype t)
     n->t = t;
     n->num = 0;
     n->str = 0;
-    n->l = n->r = 0;
+    n->l = n->r = n->a1 = n->a2 = 0;
     return n;
 }
 
@@ -261,6 +265,36 @@ static node *parse_primary(void)
             node *n = node_new(N_FREAD);
             tp += 2;
             n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
+            return n;
+        }
+        if (!strcmp64(t->str, "http_get") && toks[tp + 1].kind == 3 &&
+            toks[tp + 1].op == '(') {
+            node *n = node_new(N_HTTPGET);
+            tp += 2;
+            n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
+            return n;
+        }
+        if (!strcmp64(t->str, "str_find") && toks[tp + 1].kind == 3 &&
+            toks[tp + 1].op == '(') {
+            node *n = node_new(N_STRFIND);
+            tp += 2;
+            n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ',') tp++;
+            n->r = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
+            return n;
+        }
+        if (!strcmp64(t->str, "str_sub") && toks[tp + 1].kind == 3 &&
+            toks[tp + 1].op == '(') {
+            node *n = node_new(N_STRSUB);
+            tp += 2;
+            n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ',') tp++;
+            n->r = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ',') tp++;
+            n->a1 = parse_expr();
             if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
             return n;
         }
@@ -483,6 +517,45 @@ static val_t eval(node *n, int depth)
             return v_str(fb);
         }
         return r;
+    }
+    case N_HTTPGET: {
+        val_t a = eval(n->l, depth + 1);
+        static char hb[1024];
+        u32 target = *(volatile u32 *)0x74000u;
+        if (!target) target = 0x0202000Au;
+        if (a.is_str) {
+            int code = tcp64_http_get_body(target, 8130, a.str, hb, sizeof(hb));
+            if (code == 200) return v_str(hb);
+        }
+        return v_str((char *)"");
+    }
+    case N_STRFIND: {
+        val_t a = eval(n->l, depth + 1);
+        val_t b = eval(n->r, depth + 1);
+        long idx = -1;
+        if (a.is_str && b.is_str) {
+            long i, j;
+            for (i = 0; a.str[i]; i++) {
+                for (j = 0; b.str[j] && a.str[i + j] == b.str[j]; j++) { }
+                if (!b.str[j]) { idx = i; break; }
+            }
+        }
+        return v_num(idx);
+    }
+    case N_STRSUB: {
+        val_t a = eval(n->l, depth + 1);
+        val_t b = eval(n->r, depth + 1);
+        val_t c = eval(n->a1, depth + 1);
+        char *d = (char *)kmalloc64(MAXSTR);
+        long i, k = 0;
+        long start = b.num, len = c.num;
+        for (i = 0; i < MAXSTR - 1; i++) d[i] = 0;
+        if (a.is_str && start >= 0 && len >= 0) {
+            for (i = start; a.str[i] && i < start + len && k < MAXSTR - 1; i++)
+                d[k++] = a.str[i];
+        }
+        d[k] = 0;
+        return v_str(d);
     }
     case N_BIN: {
         val_t a = eval(n->l, depth + 1);

@@ -302,6 +302,8 @@ void kernel_main64(void)
         extern int ajlang64_run(const char *);
         serial_puts(" AJLang-64: running DEMO.TXT\n");
         ajlang64_run("DEMO.TXT");
+        serial_puts(" AJLang-64: running HTTP.TXT (http_get from a script)\n");
+        ajlang64_run("HTTP.TXT");
     }
 
     serial_puts("\n Milestone 8: interactive shell.\n");
