@@ -13,6 +13,13 @@ typedef unsigned int   u32;
 typedef unsigned long long u64;
 
 /* ---- externs from intr64.c / pmm64.c ---- */
+extern void net64_init(void);
+extern int net64_arp_resolve(unsigned int ip);
+extern int net64_ping(unsigned int dst, unsigned short seq);
+extern void net64_poll(void);
+extern void e1000_64_init(void);
+extern void e1000_64_debug_dump(void);
+extern int e1000_64_present(void);
 extern void vm64_init(void);
 extern void heap64_init(void);
 extern void *kmalloc64(unsigned long long n);
@@ -104,8 +111,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 3\n");
-    serial_puts(" (VM: 4KB pages + NX, kernel heap, kmalloc)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 4\n");
+    serial_puts(" (e1000 polling NIC + ARP/IP4/ICMP ping)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -197,7 +204,39 @@ void kernel_main64(void)
         kfree64(p4);
     }
 
-    serial_puts("\n Milestone 3 complete. Next: drivers (e1000/ATA/FAT).\n");
+    /* ---- M4: network - e1000 polling + ARP/IP/ICMP ---- */
+    e1000_64_init();
+    net64_init();
+    if (e1000_64_present()) {
+        int seq;
+        int ok = 0;
+        if (net64_arp_resolve(0x0202000Au) == 0) {
+            serial_puts(" ARP: gateway 10.0.2.2 resolved\n");
+        } else {
+            serial_puts(" ARP: gateway resolve FAILED\n");
+            e1000_64_debug_dump();
+        }
+        for (seq = 1; seq <= 4; seq++) {
+            int r = net64_ping(0x0202000Au, (unsigned short)seq);
+            if (r >= 0) {
+                ok++;
+                serial_puts(" ping seq=");
+                serial_put_dec((u64)seq);
+                serial_puts(": reply rtt=");
+                serial_put_dec((u64)r * 10);
+                serial_puts("ms\n");
+            } else {
+                serial_puts(" ping seq=");
+                serial_put_dec((u64)seq);
+                serial_puts(": TIMEOUT\n");
+            }
+        }
+        serial_puts(" PONG count=");
+        serial_put_dec((u64)ok);
+        serial_puts("/4\n");
+    }
+
+    serial_puts("\n Milestone 4 complete. Next: TCP/UDP, then ATA/FAT.\n");
     serial_puts("================================================\n");
 
     for (;;)
