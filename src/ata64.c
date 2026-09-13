@@ -181,9 +181,19 @@ int ata64_read_lba(u32 lba, u16 count, void *buf)
             int spins = 2000000;
             for (;;) {
                 u8 st = inb(ATA_STATUS);
-                if (st & ATA_STAT_ERR) return -3;
+                if (st & ATA_STAT_ERR) {
+                    ser_puts(" [ata] ERR st=");
+                    ser_put_dec(st);
+                    ser_puts("\n");
+                    return -3;
+                }
                 if (!(st & ATA_STAT_BSY) && (st & ATA_STAT_DRQ)) break;
-                if (--spins <= 0) return -5;
+                if (--spins <= 0) {
+                    ser_puts(" [ata] timeout st=");
+                    ser_put_dec(st);
+                    ser_puts("\n");
+                    return -5;
+                }
             }
             __asm__ __volatile__("cld; rep insw"
                                  : "+D"(p)

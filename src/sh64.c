@@ -12,6 +12,7 @@ extern int ata64_init(void);
 extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern int ajlang64_run(const char *name);
+extern void user64_exec(const unsigned char *img, unsigned int size);
 extern void tcp64_server_pump(void);
 extern void net64_poll(void);
 extern void fat64_list(void);
@@ -73,7 +74,7 @@ static void sh_prompt(void)
 
 static void cmd_help(void)
 {
-    ser_puts(" commands: help ls cat FILE aj SCRIPT.aj mem ping http uptime echo clear\n");
+    ser_puts(" commands: help ls cat FILE aj SCRIPT run BIN.UP mem ping http uptime echo clear\n");
     ser_puts(" ping/http target the slirp gateway 10.0.2.2\n");
 }
 
@@ -173,6 +174,13 @@ static void exec_line(char *l)
     }
     if (l[0] == 'c' && l[1] == 'a' && l[2] == 't' && l[3] == ' ') { cmd_cat(l + 4); return; }
     if (l[0] == 'a' && l[1] == 'j' && l[2] == ' ') { ajlang64_run(l + 3); return; }
+    if (l[0] == 'r' && l[1] == 'u' && l[2] == 'n' && l[3] == ' ') {
+        static unsigned char prog[4096];
+        int n = fat64_read_file(l + 4, prog, sizeof(prog));
+        if (n > 0) user64_exec(prog, (unsigned int)n);
+        else ser_puts(" run: not found\n");
+        return;
+    }
     if (l[0] == 'e' && l[1] == 'c' && l[2] == 'h' && l[3] == 'o') { ser_puts(l + 4); ser_puts("\n"); return; }
     ser_puts(" unknown: ");
     ser_puts(l);

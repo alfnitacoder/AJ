@@ -192,6 +192,32 @@ u64 syscall_handler(u64 nr, u64 a1, u64 a2)
     return (u64)-1;
 }
 
+/* Map fresh pages and jump into a user image (never returns: the exit
+ * syscall continues in a fresh shell). Position-independent images only
+ * (rip-relative), loaded at USER_BASE. */
+void user64_exec(const u8 *img, u32 size)
+{
+    u64 code_frame = pmm64_alloc_frame();
+    u64 stack_frame = pmm64_alloc_frame();
+    u64 i;
+    u8 *dst;
+
+    if (size > 4096) size = 4096;
+    vm64_map_user(USER_BASE, code_frame, 0);
+    vm64_map_user(USER_STACK, stack_frame, 1);
+    dst = (u8 *)USER_BASE;
+    for (i = 0; i < size; i++) dst[i] = img[i];
+
+    /* re-arm the descriptor tables: the GDT/TSS state must be intact for
+     * the iretq into ring 3 on every exec (evidence: #GP(0x28) with a
+     * stale GDTR/TR in the -d int dump) */
+    lgdt_and_tr();
+    ser_puts(" exec: ");
+    ser_put_dec(size);
+    ser_puts(" bytes at 0x100000000000 -> ring 3\n");
+    jump_to_user(USER_BASE, USER_STACK + 4096);
+}
+
 void user64_start(void)
 {
     u64 code_frame = pmm64_alloc_frame();

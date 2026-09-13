@@ -186,7 +186,7 @@ static int name_eq83(const u8 *entry, const char *name)
     }
     for (i = 0; i < 3; i++) {
         char e = (char)entry[8 + i];
-        char w = (i < 3) ? ext[i] : 0;
+        char w = (i < 3 && ext[i]) ? ext[i] : ' ';
         if (e >= 'a' && e <= 'z') e -= 32;
         if (e != w) return 0;
     }
@@ -250,11 +250,19 @@ int fat64_read_file(const char *name, void *out, u32 cap)
         u8 *outp = (u8 *)out;
         u32 copied = 0;
         u32 guard = 0;
+        ser_puts(" [rf] cl=");
+        ser_put_dec(cluster);
+        ser_puts(" size=");
+        ser_put_dec(size);
+        ser_puts("\n");
         while (cluster >= 2 && copied < size && cap > 0 && guard++ < 65536) {
             u32 lba = f_data_lba + (cluster - 2) * f_spc;
             u32 chunk = (u32)f_spc * f_bps;
             u8 sec[8192];
             u32 i;
+            ser_puts(" [rf] read lba=");
+            ser_put_dec(lba);
+            ser_puts("\n");
             if (chunk > sizeof(sec)) chunk = sizeof(sec);
             if (ata64_read_lba(lba, (u16)(chunk / f_bps), sec) != 0) return -2;
             for (i = 0; i < chunk && copied < size && copied < cap; i++)

@@ -33,6 +33,7 @@ AJ64_SRC = $(SRC_DIR)/ajlang64.c
 USER64C_SRC = $(SRC_DIR)/user64.c
 USER64_SRC = asm/user64.asm
 USER64_ENTRY_SRC = asm/user64_entry.asm
+USERPROG_SRC = asm/userprog.asm
 ISR64_SRC = $(ASM_DIR)/isr64.asm
 BOOT64_OBJ = $(BUILD_DIR)/boot64.bin
 KERNEL64_ENTRY_OBJ = $(BUILD_DIR)/kernel_entry64.o
@@ -50,6 +51,7 @@ AJ64_OBJ = $(BUILD_DIR)/ajlang64.o
 USER64C_OBJ = $(BUILD_DIR)/user64c.o
 USER64_BIN = $(BUILD_DIR)/user64.bin
 USERPROG_OBJ = $(BUILD_DIR)/userprog64.o
+UPBIN = $(BUILD_DIR)/userprog.bin
 USER64_ENTRY_OBJ = $(BUILD_DIR)/user64_entry.o
 KERNEL64_ELF = $(BUILD_DIR)/kernel64.elf
 KERNEL64_BIN = $(BUILD_DIR)/kernel64.bin
@@ -201,6 +203,9 @@ $(USER64_BIN): $(USER64_SRC)
 $(USER64_ENTRY_OBJ): $(USER64_ENTRY_SRC)
 	$(AS) $(ASFLAGS64) $< -o $@
 
+$(UPBIN): $(USERPROG_SRC)
+	$(AS) -f bin $< -o $@
+
 $(USERPROG_OBJ): $(USER64_BIN)
 	cd $(BUILD_DIR) && $(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.userprog,alloc,load,readonly,data,contents user64.bin userprog64.o
 
@@ -224,7 +229,7 @@ run64: $(OS64_IMG)
 	$(QEMU64_RUN) -m 512M -drive file=$(OS64_IMG),format=raw,if=floppy $(QEMU64_NET) -no-reboot -monitor none -serial stdio -display none
 
 .PHONY: test64
-test64: $(OS64_IMG)
+test64: $(OS64_IMG) $(UPBIN)
 	@mkdir -p build/htdoc
 	@printf '<html><body>AJOS64-HTTP-TEST-PAGE</body></html>\n' > build/htdoc/index.html
 	@pkill -f "http.server 8130" 2>/dev/null; sleep 1; true
@@ -237,11 +242,12 @@ test64: $(OS64_IMG)
 	@printf 'print "AJOS64-WEB-SERVER-LANG"\nprint "data from disk:"\nprint file_read("HELLO.TXT")\n' > build/data64_staging/data/WEB.TXT
 	@printf 'var name = query("name")\nvar msg = query("msg")\nvar old = file_read("GB.TXT")\nvar entry = old + name + ": " + msg + "\n"\nfile_write("GB.TXT", entry)\nprint "GB-SAVED"\n' > build/data64_staging/data/GBAPP.TXT
 	@printf 'Guestbook:\n' > build/data64_staging/data/GB.TXT
+	@cp $(UPBIN) build/data64_staging/data/HELLO64.UP
 	@printf 'print "<html><body><h1>AJOS64 Guestbook</h1><pre>"\nprint file_read("GB.TXT")\nprint "</pre>"\nprint "<form method=POST action=/gb>Name: <input name=name>"\nprint "Msg: <input name=msg><input type=submit value=Sign>"\nprint "</form></body></html>"\n' > build/data64_staging/data/WEB.TXT
 	@printf 'var n = num(file_read("VISITS.TXT"))\nvar n2 = n + 1\nfile_write("VISITS.TXT", "" + n2)\nprint "VISIT " + n2\n' > build/data64_staging/data/HITS.TXT
 	@printf '0' > build/data64_staging/data/VISITS.TXT
 	@cd build/data64_staging && python3 ../../tools/mkfat12.py ../data64.img --size-mb 4 >/dev/null 2>&1; true
-	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 19; curl -s -m 4 -d "name=Tester&msg=HELLO-FROM-BROWSER" http://127.0.0.1:8080/gb > build/gbpost.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/ > build/web80.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count1.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count2.txt 2>/dev/null; sleep 2; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "GB-SAVED" build/gbpost.txt && grep -q "Tester: HELLO-FROM-BROWSER" build/web80.txt && grep -q "VISIT 1" build/count1.txt && grep -q "VISIT 2" build/count2.txt && grep -q "AJOS64 Guestbook" build/web80.txt && grep -q "LONG MODE MILESTONE 14" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && grep -q "sh64 ready" build/serial64.log && grep -q "AJLANG64-RUN-OK" build/serial64.log && grep -q "THE-ANSWER" build/serial64.log && grep -q "AJOS64-HTTP-TEST-PAGE" build/serial64.log && grep -q "STR-BUILTINS-OK" build/serial64.log && grep -q "HELLO-FROM-RING3" build/serial64.log && grep -q "RING3-SYSCALL-OK" build/serial64.log && grep -q "WRITE-BACK-OK-11" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
+	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 80; curl -s -m 5 -d "name=Tester&msg=HELLO-FROM-BROWSER" http://127.0.0.1:8080/gb > build/gbpost.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/ > build/web80.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count1.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count2.txt 2>/dev/null; sleep 6; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "GB-SAVED" build/gbpost.txt && grep -q "Tester: HELLO-FROM-BROWSER" build/web80.txt && grep -q "VISIT 1" build/count1.txt && grep -q "VISIT 2" build/count2.txt && grep -q "AJOS64 Guestbook" build/web80.txt && grep -q "LONG MODE MILESTONE 14" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && grep -q "sh64 ready" build/serial64.log && grep -q "AJLANG64-RUN-OK" build/serial64.log && grep -q "THE-ANSWER" build/serial64.log && grep -q "AJOS64-HTTP-TEST-PAGE" build/serial64.log && grep -q "STR-BUILTINS-OK" build/serial64.log && grep -q "HELLO-FROM-RING3" build/serial64.log && grep -q "RING3-SYSCALL-OK" build/serial64.log && grep -q "WRITE-BACK-OK-11" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022
