@@ -37,25 +37,30 @@ extern unsigned short ajlang64_output_len(void);
 
 static char web_body[1024];
 
+static int web_route(const char *script, char *out, unsigned short cap)
+{
+    unsigned short n;
+    ajlang64_set_output(out, cap);
+    ajlang64_run(script);
+    ajlang64_output_off();
+    n = ajlang64_output_len();
+    return (int)n;
+}
+
 static int web_handler(const char *req, char *out, unsigned short cap)
 {
-    /* route: GET / -> run WEB.AJ, serve its print output */
+    /* routes: GET / -> WEB.TXT, GET /count -> COUNT.AJ (persistent counter) */
     if (req[0] == 'G' && req[1] == 'E' && req[2] == 'T' &&
         req[3] == ' ' && req[4] == '/' &&
-        (req[5] == ' ' || req[5] == '?')) {
-        ajlang64_set_output(web_body, sizeof(web_body));
-        ajlang64_run("WEB.TXT");
-        ajlang64_output_off();
-        {
-            unsigned short n = ajlang64_output_len();
-            unsigned short i;
-            if (n > cap) n = cap;
-            for (i = 0; i < n; i++) out[i] = web_body[i];
-            return (int)n;
-        }
-    }
+        (req[5] == ' ' || req[5] == '?'))
+        return web_route("WEB.TXT", out, cap);
+    if (req[0] == 'G' && req[1] == 'E' && req[2] == 'T' &&
+        req[3] == ' ' && req[4] == '/' && req[5] == 'c' &&
+        req[6] == 'o' && req[7] == 'u' && req[8] == 'n' && req[9] == 't' &&
+        (req[10] == ' ' || req[10] == '?'))
+        return web_route("HITS.TXT", out, cap);
     {
-        const char *nf = "404 not found (AJOS-64 serves / only)";
+        const char *nf = "404 not found (routes: / and /count)";
         unsigned short i;
         for (i = 0; nf[i] && i < cap - 1; i++) out[i] = nf[i];
         out[i] = 0;
@@ -159,8 +164,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 12\n");
-    serial_puts(" (HTTP server: AJLang scripts served on :80)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 13\n");
+    serial_puts(" (stateful web app: persistent visit counter)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -355,7 +360,7 @@ void kernel_main64(void)
         tcp64_init();
         tcp64_serve_start(80);
         tcp64_set_handler(web_handler);
-        serial_puts(" web server: listening on :80 (route / runs WEB.TXT)\n");
+        serial_puts(" web server: listening on :80 (routes / and /count (persistent))\n");
     }
 
     /* ---- M10: ring 3 user program + syscall/sysret ---- */

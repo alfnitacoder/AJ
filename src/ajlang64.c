@@ -434,6 +434,12 @@ static stmt *parse_stmt(void)
         st->expr = parse_expr();
         return st;
     }
+    if (t->kind == 2) {
+        /* expression statement: bare call like file_write(...) */
+        stmt *st = stmt_new(5);
+        st->expr = parse_expr();
+        return st;
+    }
     aj_err = t->line;
     return 0;
 }
@@ -612,6 +618,7 @@ static val_t eval(node *n, int depth)
                         while (x) { buf[bi++] = (char)('0' + (x % 10)); x /= 10; }
                         while (bi) t2[k++] = buf[--bi];
                         t2[k] = 0; sb = t2;
+                        k = 0;
                     }
                     while (sa[i] && i < MAXSTR - 2) { d[i] = sa[i]; i++; }
                     while (sb[k] && i < MAXSTR - 2) { d[i++] = sb[k++]; }
@@ -708,6 +715,9 @@ static void exec_stmt(stmt *st, int depth)
         else exec_stmts(st->els, depth + 1);
         break;
     }
+    case 5:
+        eval(st->expr, depth);
+        break;
     case 3: {
         int guard = 0;
         while (guard++ < 100000) {
