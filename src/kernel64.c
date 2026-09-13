@@ -120,8 +120,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 10\n");
-    serial_puts(" (ring 3 user program via syscall/sysret)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 11\n");
+    serial_puts(" (FAT12 writes: file_write persists)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -306,6 +306,8 @@ void kernel_main64(void)
         ajlang64_run("DEMO.TXT");
         serial_puts(" AJLang-64: running HTTP.TXT (http_get from a script)\n");
         ajlang64_run("HTTP.TXT");
+        serial_puts(" AJLang-64: running WRITE.TXT (file_write to disk)\n");
+        ajlang64_run("WRITE.TXT");
     }
 
     /* ---- M10: ring 3 user program + syscall/sysret ---- */

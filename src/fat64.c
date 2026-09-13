@@ -265,3 +265,224 @@ int fat64_read_file(const char *name, void *out, u32 cap)
         return (int)copied;
     }
 }
+
+/* ---- write support (milestone 11) ---- */
+extern int ata64_write_lba(u32 lba, u16 count, const void *buf);
+
+/* encode "NAME.EXT" into the 11-byte 8.3 dirent form; returns 0 if the
+ * name does not fit 8.3 */
+static int name_to83(const char *name, u8 *out)
+{
+    int i, bi = 0, stage = 0;
+    for (i = 0; i < 11; i++) out[i] = ' ';
+    for (i = 0; name[i]; i++) {
+        char c = name[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (c == '.') {
+            if (stage) return 0;
+            stage = 1;
+            bi = 8;
+            continue;
+        }
+        if (stage == 0) {
+            if (bi >= 8) return 0;
+            out[bi++] = (u8)c;
+        } else {
+            if (bi >= 11) return 0;
+            out[bi++] = (u8)c;
+        }
+    }
+    return 1;
+}
+
+static void fat_flush(void)
+{
+    u16 f;
+    u32 bytes = (u32)f_nfats * f_spf * f_bps;
+    if (bytes > fat_cache_bytes) bytes = fat_cache_bytes;
+    for (f = 0; f < f_nfats; f++)
+        ata64_write_lba((u32)f_reserved + f * f_spf,
+                        (u16)(bytes / f_bps), fat_cache);
+}
+
+static u32 fat_alloc_cluster(void)
+{
+    u32 cl;
+    for (cl = 2; ; cl++) {
+        u32 off;
+        u16 v;
+        if (f_type == 12) {
+            off = cl + cl / 2;
+            if (off + 1 >= fat_cache_bytes) return 0;
+            if (cl & 1)
+                v = (u16)(((u16)fat_cache[off] >> 4) | ((u16)fat_cache[off + 1] << 4));
+            else
+                v = (u16)(fat_cache[off] | ((u16)fat_cache[off + 1] << 8));
+            v &= 0xFFF;
+            if (v != 0) continue;
+            /* set EOC 0xFFF, preserving the packed neighbour nibbles */
+            if (cl & 1) {
+                fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | 0xF0;
+                fat_cache[off + 1] |= 0x0F;
+            } else {
+                fat_cache[off] |= 0x0F;
+                fat_cache[off + 1] = (u8)(fat_cache[off + 1] & 0xF0) | 0x0F;
+            }
+            return cl;
+        } else {
+            off = cl * 2;
+            if (off + 1 >= fat_cache_bytes) return 0;
+            v = rd16(fat_cache + off);
+            if (v != 0) continue;
+            fat_cache[off] = 0xF8;
+            fat_cache[off + 1] = 0xFF;
+            return cl;
+        }
+    }
+}
+
+static void fat_free_chain(u32 cl)
+{
+    u32 guard = 0;
+    while (cl >= 2 && guard++ < 65536) {
+        u32 next = next_cluster(cl);
+        if (f_type == 12) {
+            u32 off = cl + cl / 2;
+            if (cl & 1) {
+                fat_cache[off] &= 0x0F;
+                fat_cache[off + 1] &= 0xF0;
+            } else {
+                fat_cache[off] &= 0xF0;
+                fat_cache[off + 1] &= 0x0F;
+            }
+        } else {
+            u32 off = cl * 2;
+            fat_cache[off] = 0;
+            fat_cache[off + 1] = 0;
+        }
+        if (next == 0) break;
+        cl = next;
+    }
+}
+
+/* Write len bytes to /NAME.EXT (create or replace). Returns len, or <0. */
+int fat64_write_file(const char *name, const void *data, u32 len)
+{
+    u8 name83[11];
+    u8 *ent = 0;
+    u32 e, cluster, prev, first;
+    u32 written = 0;
+    const u8 *src = (const u8 *)data;
+    u32 guard = 0;
+
+    if (!name_to83(name, name83)) return -5;
+    if (len > 65535) len = 65535;
+
+    /* find the existing entry (for replace) */
+    for (e = 0; e + 32 <= root_cache_bytes; e += 32) {
+        u8 *d = root_cache + e;
+        if (d[0] == 0x00) break;
+        if (d[0] == 0xE5 || d[11] == 0x0F) continue;
+        if (d[11] & 0x18) continue;
+        {
+            int i, same = 1;
+            for (i = 0; i < 11; i++)
+                if (d[i] != name83[i]) { same = 0; break; }
+            if (same) { ent = d; break; }
+        }
+    }
+
+    /* free the old chain if replacing */
+    if (ent) {
+        u32 old = rd16(ent + 26);
+        if (old >= 2) fat_free_chain(old);
+    } else {
+        /* find a free root slot: 0x00 or 0xE5 */
+        for (e = 0; e + 32 <= root_cache_bytes; e += 32) {
+            u8 *d = root_cache + e;
+            if (d[0] == 0x00 || d[0] == 0xE5) { ent = d; break; }
+        }
+        if (!ent) return -6;
+        {
+            int i;
+            for (i = 0; i < 11; i++) ent[i] = name83[i];
+            for (i = 12; i < 32; i++) ent[i] = 0;
+        }
+        ent[11] = 0x20;                      /* archive bit */
+    }
+
+    /* allocate + write the clusters */
+    first = 0;
+    prev = 0;
+    while (written < len && guard++ < 65536) {
+        u32 chunk;
+        cluster = fat_alloc_cluster();
+        if (!cluster) { fat_flush(); return -7; }
+        if (!first) first = cluster;
+        if (prev) {
+            /* link prev -> cluster in the FAT */
+            if (f_type == 12) {
+                u32 off = prev + prev / 2;
+                if (prev & 1) {
+                    fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | ((u8)(cluster << 4));
+                    fat_cache[off + 1] = (u8)((cluster >> 4) & 0xFF);
+                } else {
+                    fat_cache[off] = (u8)(cluster & 0xFF);
+                    fat_cache[off + 1] = (u8)((fat_cache[off + 1] & 0xF0) |
+                                              ((cluster >> 8) & 0x0F));
+                }
+            } else {
+                u32 off = prev * 2;
+                fat_cache[off] = (u8)(cluster & 0xFF);
+                fat_cache[off + 1] = (u8)(cluster >> 8);
+            }
+        }
+        {
+            u8 sec[4096];
+            u32 lba = f_data_lba + (cluster - 2) * f_spc;
+            u32 i;
+            chunk = (u32)f_spc * f_bps;
+            if (chunk > sizeof(sec)) chunk = sizeof(sec);
+            for (i = 0; i < chunk; i++)
+                sec[i] = (written + i < len) ? src[written + i] : 0;
+            if (ata64_write_lba(lba, (u16)(chunk / f_bps), sec) != 0) {
+                fat_flush();
+                return -8;
+            }
+        }
+        written += chunk;
+        if (written > len) written = len;
+        prev = cluster;
+        if (written >= len) break;
+    }
+    if (!first) {                          /* empty file: still needs 1 cl? no */
+        first = 0;
+    } else {
+        /* mark the last cluster EOC */
+        if (f_type == 12) {
+            u32 off = prev + prev / 2;
+            if (prev & 1) {
+                fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | 0xF0;
+                fat_cache[off + 1] |= 0x0F;
+            } else {
+                fat_cache[off] |= 0x0F;
+                fat_cache[off + 1] = (u8)(fat_cache[off + 1] & 0xF0) | 0x0F;
+            }
+        } else {
+            u32 off = prev * 2;
+            fat_cache[off] = 0xFF;
+            fat_cache[off + 1] = 0xFF;
+        }
+    }
+
+    ent[26] = (u8)(first & 0xFF);
+    ent[27] = (u8)(first >> 8);
+    ent[28] = (u8)(len & 0xFF);
+    ent[29] = (u8)((len >> 8) & 0xFF);
+    ent[30] = (u8)((len >> 16) & 0xFF);
+    ent[31] = (u8)((len >> 24) & 0xFF);
+
+    fat_flush();                            /* both FAT copies */
+    ata64_write_lba(f_root_lba, (u16)(root_cache_bytes / f_bps), root_cache);
+    return (int)written;
+}

@@ -129,6 +129,40 @@ int ata64_init(void)
 }
 
 /* Read `count` sectors starting at `lba` into buf (count*512 bytes). */
+/* Write `count` sectors from buf to `lba`. */
+int ata64_write_lba(u32 lba, u16 count, const void *buf)
+{
+    if (!ata_present) return -1;
+    if (count == 0) return 0;
+    if (wait_not_bsy(200000) != 0) return -2;
+    outb(ATA_DRIVE, (u8)(0xE0 | ((lba >> 24) & 0x0F)));
+    outb(ATA_SECCNT, (u8)count);
+    outb(ATA_LBA_LO, (u8)(lba & 0xFF));
+    outb(ATA_LBA_MID, (u8)((lba >> 8) & 0xFF));
+    outb(ATA_LBA_HI, (u8)((lba >> 16) & 0xFF));
+    outb(ATA_CMD, 0x30);             /* WRITE SECTORS with retry */
+    {
+        u16 s;
+        const u16 *p = (const u16 *)buf;
+        for (s = 0; s < count; s++) {
+            int spins = 2000000;
+            for (;;) {
+                u8 st = inb(ATA_STATUS);
+                if (st & ATA_STAT_ERR) return -3;
+                if (!(st & ATA_STAT_BSY) && (st & ATA_STAT_DRQ)) break;
+                if (--spins <= 0) return -5;
+            }
+            __asm__ __volatile__("cld; rep outsw"
+                                 : "+S"(p)
+                                 : "c"(256), "d"(ATA_DATA)
+                                 : "memory");
+        }
+    }
+    /* wait for the completion (BSY clear) */
+    if (wait_not_bsy(2000000) != 0) return -6;
+    return 0;
+}
+
 int ata64_read_lba(u32 lba, u16 count, void *buf)
 {
     if (!ata_present) return -1;

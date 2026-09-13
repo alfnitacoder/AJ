@@ -16,6 +16,7 @@ extern void *kmalloc64(unsigned long long n);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern int tcp64_http_get_body(unsigned int ip, unsigned short port,
                                const char *path, char *out, unsigned short cap);
+extern int fat64_write_file(const char *name, const void *data, unsigned int len);
 
 #define COM1 0x3F8
 static inline void outb(u16 port, u8 val)
@@ -145,7 +146,7 @@ static void lex(const char *src)
 
 /* ---- AST ---- */
 typedef enum { N_NUM, N_STR, N_VAR, N_BIN, N_STRLEN, N_STRCAT, N_NUMCVT,
-               N_FREAD, N_HTTPGET, N_STRFIND, N_STRSUB } ntype;
+               N_FREAD, N_HTTPGET, N_STRFIND, N_STRSUB, N_FILEWRITE } ntype;
 
 typedef struct node {
     ntype t;
@@ -273,6 +274,16 @@ static node *parse_primary(void)
             node *n = node_new(N_HTTPGET);
             tp += 2;
             n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
+            return n;
+        }
+        if (!strcmp64(t->str, "file_write") && toks[tp + 1].kind == 3 &&
+            toks[tp + 1].op == '(') {
+            node *n = node_new(N_FILEWRITE);
+            tp += 2;
+            n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ',') tp++;
+            n->r = parse_expr();
             if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
             return n;
         }
@@ -528,6 +539,19 @@ static val_t eval(node *n, int depth)
             if (code == 200) return v_str(hb);
         }
         return v_str((char *)"");
+    }
+    case N_FILEWRITE: {
+        val_t a = eval(n->l, depth + 1);
+        val_t b = eval(n->r, depth + 1);
+        long len = 0;
+        if (a.is_str && b.is_str) {
+            while (b.str[len]) len++;
+            {
+                int w = fat64_write_file(a.str, b.str, (unsigned int)len);
+                return v_num(w);
+            }
+        }
+        return v_num(-1);
     }
     case N_STRFIND: {
         val_t a = eval(n->l, depth + 1);
