@@ -407,18 +407,7 @@ void kernel_main64(void)
         ajlang64_run("HTTP.TXT");
         serial_puts(" AJLang-64: running WRITE.TXT (file_write to disk)\n");
         ajlang64_run("WRITE.TXT");
-        serial_puts(" exec: running HELLO64.UP from disk\n");
-        {
-            extern int fat64_read_file(const char *, void *, unsigned int);
-            static unsigned char upimg[4096];
-            int un = fat64_read_file("HELLO64.UP", upimg, sizeof(upimg));
-            if (un > 0) {
-                extern void user64_exec(const unsigned char *, unsigned int);
-                user64_exec(upimg, (unsigned int)un);
-            } else {
-                serial_puts(" HELLO64.UP not found\n");
-            }
-        }
+        serial_puts(" exec: disk programs available via 'run FILE.UP' (auto-run parked: ATA hang)\n");
     }
 
     /* ---- M12: web server (AJLang-driven, port 80) ---- */
