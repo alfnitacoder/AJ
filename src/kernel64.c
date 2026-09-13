@@ -24,6 +24,8 @@ extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern void sh64_run(void) __attribute__((noreturn));
 extern int ajlang64_run(const char *name);
+extern void user64_init(void);
+extern void user64_start(void) __attribute__((noreturn));
 extern void tcp64_init(void);
 extern int tcp64_http_get(unsigned int ip, unsigned short port, const char *path, unsigned short *status, unsigned short *len);
 extern int e1000_64_present(void);
@@ -118,8 +120,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 8\n");
-    serial_puts(" (AJLang interpreter: DEMO.AJ runs on-disk)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 10\n");
+    serial_puts(" (ring 3 user program via syscall/sysret)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -306,7 +308,13 @@ void kernel_main64(void)
         ajlang64_run("HTTP.TXT");
     }
 
-    serial_puts("\n Milestone 8: interactive shell.\n");
+    /* ---- M10: ring 3 user program + syscall/sysret ---- */
+    serial_puts(" M10: user program (ring 3)\n");
+    user64_init();
+    user64_start();
+    /* noreturn: the user exits via the syscall, which lands in the shell */
+
+    serial_puts("\n Milestone 10 shell.\n");
     serial_puts("================================================\n");
     sh64_run();   /* never returns */
 

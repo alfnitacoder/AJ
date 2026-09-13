@@ -20,6 +20,7 @@ extern void pmm64_free_frame(u64 phys);
 #define PTE_P   1ull
 #define PTE_W   2ull
 #define PTE_NX  (1ull << 63)
+#define PTE_U   (1ull << 2)
 #define ADDR_MASK 0x000FFFFFFFFFF000ull
 
 #define HEAP_VMA    0x20000000000ull    /* 2TB, canonical, below 2^47 */
@@ -88,6 +89,8 @@ static void wr_efer(u64 v)
 
 /* ---- page tables ---- */
 
+static int map_user_flag;   /* set while mapping user pages (U/S on all levels) */
+
 /* Descend one level, allocating + zeroing the table if absent. */
 static u64 *next_level(u64 *entry_ptr)
 {
@@ -95,7 +98,9 @@ static u64 *next_level(u64 *entry_ptr)
     if (!(e & PTE_P)) {
         u64 t = pmm64_alloc_frame();
         kmemset64((void *)t, 0, 4096);
-        e = t | PTE_P | PTE_W | PTE_NX;
+        /* NX on an intermediate entry propagates to everything below it,
+         * so the user subtree must not have NX on its tables. */
+        e = t | PTE_P | PTE_W | (map_user_flag ? (u64)PTE_U : (u64)PTE_NX);
         *entry_ptr = e;
     }
     return (u64 *)(e & ADDR_MASK);
@@ -108,6 +113,21 @@ static void vm64_map(u64 vaddr, u64 paddr)
     u64 *pd   = next_level(&pdpt[(vaddr >> 30) & 511]);
     u64 *pt   = next_level(&pd[(vaddr >> 21) & 511]);
     pt[(vaddr >> 12) & 511] = paddr | PTE_P | PTE_W | PTE_NX;
+}
+
+/* Map a 4KB page as USER (P|W|U, optional NX). */
+void vm64_map_user(u64 vaddr, u64 paddr, int noexec)
+{
+    u64 *pml4;
+    map_user_flag = 1;
+    pml4 = (u64 *)rd_cr3();
+    u64 *pdpt = next_level(&pml4[(vaddr >> 39) & 511]);
+    u64 *pd   = next_level(&pdpt[(vaddr >> 30) & 511]);
+    u64 *pt   = next_level(&pd[(vaddr >> 21) & 511]);
+    pt[(vaddr >> 12) & 511] = paddr | PTE_P | PTE_W | PTE_U |
+                              (noexec ? PTE_NX : 0);
+    __asm__ __volatile__("invlpg (%0)" : : "r"(vaddr) : "memory");
+    map_user_flag = 0;
 }
 
 void vm64_init(void)
