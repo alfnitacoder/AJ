@@ -22,7 +22,46 @@ extern void e1000_64_debug_dump(void);
 extern int ata64_init(void);
 extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
+extern int ajlang64_run(const char *name);
 extern void sh64_run(void) __attribute__((noreturn));
+extern void tcp64_serve_start(unsigned short port);
+extern void tcp64_set_handler(int (*fn)(const char *req, char *out, unsigned short cap));
+extern void ajlang64_set_output(char *buf, unsigned short cap);
+extern void ajlang64_output_off(void);
+extern unsigned short ajlang64_output_len(void);
+extern void tcp64_serve_start(unsigned short port);
+extern void tcp64_set_handler(int (*fn)(const char *req, char *out, unsigned short cap));
+extern void ajlang64_set_output(char *buf, unsigned short cap);
+extern void ajlang64_output_off(void);
+extern unsigned short ajlang64_output_len(void);
+
+static char web_body[1024];
+
+static int web_handler(const char *req, char *out, unsigned short cap)
+{
+    /* route: GET / -> run WEB.AJ, serve its print output */
+    if (req[0] == 'G' && req[1] == 'E' && req[2] == 'T' &&
+        req[3] == ' ' && req[4] == '/' &&
+        (req[5] == ' ' || req[5] == '?')) {
+        ajlang64_set_output(web_body, sizeof(web_body));
+        ajlang64_run("WEB.TXT");
+        ajlang64_output_off();
+        {
+            unsigned short n = ajlang64_output_len();
+            unsigned short i;
+            if (n > cap) n = cap;
+            for (i = 0; i < n; i++) out[i] = web_body[i];
+            return (int)n;
+        }
+    }
+    {
+        const char *nf = "404 not found (AJOS-64 serves / only)";
+        unsigned short i;
+        for (i = 0; nf[i] && i < cap - 1; i++) out[i] = nf[i];
+        out[i] = 0;
+        return (int)i;
+    }
+}
 extern int ajlang64_run(const char *name);
 extern void user64_init(void);
 extern void user64_start(void) __attribute__((noreturn));
@@ -120,8 +159,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 11\n");
-    serial_puts(" (FAT12 writes: file_write persists)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 12\n");
+    serial_puts(" (HTTP server: AJLang scripts served on :80)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -310,13 +349,22 @@ void kernel_main64(void)
         ajlang64_run("WRITE.TXT");
     }
 
+    /* ---- M12: web server (AJLang-driven, port 80) ---- */
+    {
+        extern void tcp64_init(void);
+        tcp64_init();
+        tcp64_serve_start(80);
+        tcp64_set_handler(web_handler);
+        serial_puts(" web server: listening on :80 (route / runs WEB.TXT)\n");
+    }
+
     /* ---- M10: ring 3 user program + syscall/sysret ---- */
     serial_puts(" M10: user program (ring 3)\n");
     user64_init();
     user64_start();
     /* noreturn: the user exits via the syscall, which lands in the shell */
 
-    serial_puts("\n Milestone 10 shell.\n");
+    serial_puts("\n shell ready (web server co-running on :80).\n");
     serial_puts("================================================\n");
     sh64_run();   /* never returns */
 

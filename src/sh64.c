@@ -12,6 +12,8 @@ extern int ata64_init(void);
 extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern int ajlang64_run(const char *name);
+extern void tcp64_server_pump(void);
+extern void net64_poll(void);
 extern void fat64_list(void);
 extern int net64_arp_resolve(unsigned int ip);
 extern int net64_ping(unsigned int dst, unsigned short seq);
@@ -200,7 +202,9 @@ void sh64_run(void)
                 ser_putc((char)c);
             }
         } else {
-            __asm__ __volatile__("hlt");
+            net64_poll();
+            tcp64_server_pump();
+            __asm__ __volatile__("sti; hlt");
         }
     }
 }

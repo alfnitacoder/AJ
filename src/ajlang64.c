@@ -639,15 +639,42 @@ static val_t eval(node *n, int depth)
     return r;
 }
 
+/* output redirection: print into a caller buffer (HTTP serving) */
+static char *pr_out;
+static u16 pr_cap, pr_len;
+
+void ajlang64_set_output(char *buf, u16 cap)
+{
+    pr_out = buf;
+    pr_cap = cap;
+    pr_len = 0;
+}
+void ajlang64_output_off(void) { pr_out = 0; }
+u16 ajlang64_output_len(void) { return pr_len; }
+
+static void emit(char c)
+{
+    if (pr_out) {
+        if (pr_len + 1 < pr_cap) pr_out[pr_len++] = c;
+        return;
+    }
+    ser_putc(c);
+}
+
 static void print_val(val_t v)
 {
     if (v.is_str) {
         const char *s = v.str;
-        while (*s) ser_putc(*s++);
+        while (*s) emit(*s++);
+        emit('\n');
     } else {
-        ser_put_dec((u64)v.num);
+        char buf[21];
+        int i = 0;
+        if (!v.num) emit('0');
+        while (v.num) { buf[i++] = (char)('0' + (v.num % 10)); v.num /= 10; }
+        while (i) emit(buf[--i]);
+        emit('\n');
     }
-    ser_puts("\n");
 }
 
 static void exec_stmts(stmt *head, int depth);

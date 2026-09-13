@@ -61,6 +61,8 @@ static void ser_put_dec(u64 v)
 #define TS_ESTABLISHED 2
 #define TS_FIN_SENT   3
 #define TS_DONE       4
+#define TS_LISTEN     5
+#define TS_SYN_RCVD   6
 
 #define TCPF_FIN 0x01
 #define TCPF_SYN 0x02
@@ -79,6 +81,59 @@ static u16 t_window = 8192;
 static u8  t_rxbuf[8192];
 static u16 t_rxlen;
 static u8  t_rx_fin;
+
+static int seg_send(u8 flags, const u8 *payload, u16 len);
+static u32 isn(void);
+static u16 t_lastseg_len;   /* tentative; defined with the rings */
+
+/* ---- server mode ---- */
+static u8  srv_on;
+static u8  srv_req[1024];
+static u16 srv_reqlen;
+static int (*srv_handler)(const char *req, char *out, u16 cap);
+
+void tcp64_serve_start(u16 port)
+{
+    t_lport = port;
+    t_state = TS_LISTEN;
+    srv_on = 1;
+    srv_reqlen = 0;
+    t_lastseg_len = 0;
+}
+
+void tcp64_set_handler(int (*fn)(const char *req, char *out, u16 cap))
+{
+    srv_handler = fn;
+}
+
+/* build + send the response, then close and re-listen */
+static void srv_respond(void)
+{
+    static char body[1024];
+    int n = 0;
+    u16 i;
+    body[0] = 0;
+    if (srv_handler)
+        n = srv_handler((const char *)srv_req, body, sizeof(body) - 1);
+    if (n < 0) n = 0;
+    {
+        u8 resp[1400];
+        const char *hdr = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n";
+        u16 hl = 0, m;
+        while (hdr[hl]) { resp[hl] = hdr[hl]; hl++; }
+        for (m = 0; m < (u16)n && hl + m < sizeof(resp) - 8; m++)
+            resp[hl + m] = body[m];
+        hl += m;
+        seg_send(TCPF_ACK | TCPF_PSH, resp, hl);
+        t_seq += hl;
+        seg_send(TCPF_ACK | TCPF_FIN, 0, 0);
+        t_seq += 1;
+    }
+    /* back to listening */
+    t_state = TS_LISTEN;
+    srv_reqlen = 0;
+    t_lastseg_len = 0;
+}
 
 /* retransmit: the last segment copy */
 static u8  t_lastseg[600];
@@ -184,8 +239,6 @@ void tcp64_rx(const u8 *ip, u16 iplen)
     if (tlen < 20) return;
     sport = (u16)((t[0] << 8) | t[1]);
     dport = (u16)((t[2] << 8) | t[3]);
-    if (t_state == TS_CLOSED || dport != t_lport || sport != t_rport)
-        return;
     seq = ((u32)t[4] << 24) | ((u32)t[5] << 16) | ((u32)t[6] << 8) | t[7];
     ack = ((u32)t[8] << 24) | ((u32)t[9] << 16) | ((u32)t[10] << 8) | t[11];
     hdrlen = (u16)((t[12] >> 4) * 4);
@@ -193,7 +246,39 @@ void tcp64_rx(const u8 *ip, u16 iplen)
     if (hdrlen > tlen || hdrlen < 20) return;
     payload = t + hdrlen;
     plen = (u16)(tlen - hdrlen);
-
+    if (t_state == TS_CLOSED) return;
+    if (t_state == TS_LISTEN) {
+        if (dport == t_lport && (flags & TCPF_SYN) && !(flags & TCPF_ACK)) {
+            u32 srcip = ((u32)ip[15] << 24) | ((u32)ip[14] << 16) |
+                        ((u32)ip[13] << 8) | (u32)ip[12];   /* LSB-first octets */
+            t_rip = srcip;
+            t_rport = sport;
+            t_rcv_nxt = seq + 1;
+            t_seq = isn();
+            t_state = TS_SYN_RCVD;
+            ser_puts(" [web] SYN from ");
+            {
+                ser_put_dec((srcip) & 0xFF); ser_putc('.');
+                ser_put_dec((srcip >> 8) & 0xFF); ser_putc('.');
+                ser_put_dec((srcip >> 16) & 0xFF); ser_putc('.');
+                ser_put_dec((srcip >> 24) & 0xFF);
+            }
+            ser_puts("\n");
+            seg_send(TCPF_SYN | TCPF_ACK, 0, 0);
+            t_seq += 1;
+            srv_reqlen = 0;
+        }
+        return;
+    }
+    if (t_state == TS_SYN_RCVD) {
+        if ((flags & TCPF_ACK) && ack == t_seq) {
+            t_state = TS_ESTABLISHED;
+            t_lastseg_len = 0;
+        }
+        return;
+    }
+    if (dport != t_lport || sport != t_rport)
+        return;
     if (flags & TCPF_RST) {
         t_state = TS_CLOSED;
         return;
@@ -219,6 +304,10 @@ void tcp64_rx(const u8 *ip, u16 iplen)
         if (t_rxlen + plen <= sizeof(t_rxbuf)) {
             for (i = 0; i < plen; i++) t_rxbuf[t_rxlen + i] = payload[i];
             t_rxlen += plen;
+        }
+        if (srv_on && srv_reqlen + plen <= sizeof(srv_req)) {
+            for (i = 0; i < plen; i++) srv_req[srv_reqlen + i] = payload[i];
+            srv_reqlen += plen;
         }
         t_rcv_nxt += plen;
         seg_send(TCPF_ACK, 0, 0);
@@ -372,6 +461,23 @@ int tcp64_http_get_body(u32 ip, u16 port, const char *path, char *out, u16 cap)
         }
     }
     return (int)code;
+}
+
+/* drive the server state machine; call frequently (from the shell loop) */
+void tcp64_server_pump(void)
+{
+    if (!srv_on || t_state != TS_ESTABLISHED) return;
+    /* the request is complete when the header terminator arrives */
+    {
+        u16 i;
+        for (i = 0; i + 3 < srv_reqlen; i++) {
+            if (srv_req[i] == '\r' && srv_req[i + 1] == '\n' &&
+                srv_req[i + 2] == '\r' && srv_req[i + 3] == '\n') {
+                srv_respond();
+                return;
+            }
+        }
+    }
 }
 
 void tcp64_init(void)
