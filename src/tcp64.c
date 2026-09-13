@@ -467,12 +467,32 @@ int tcp64_http_get_body(u32 ip, u16 port, const char *path, char *out, u16 cap)
 void tcp64_server_pump(void)
 {
     if (!srv_on || t_state != TS_ESTABLISHED) return;
-    /* the request is complete when the header terminator arrives */
+    /* the request is complete when the header terminator arrives AND the
+     * Content-Length body bytes are in (POST) */
     {
         u16 i;
         for (i = 0; i + 3 < srv_reqlen; i++) {
             if (srv_req[i] == '\r' && srv_req[i + 1] == '\n' &&
                 srv_req[i + 2] == '\r' && srv_req[i + 3] == '\n') {
+                u32 body_start = i + 4;
+                u32 clen = 0;
+                u16 h;
+                for (h = 0; h + 15 < i; h++) {
+                    if ((srv_req[h] | 0x20) == 'c') {
+                        u16 q, eq = 1;
+                        static const char clh[15] = "content-length:";
+                        for (q = 0; q < 15; q++)
+                            if ((srv_req[h + q] | 0x20) != clh[q]) { eq = 0; break; }
+                        if (eq) {
+                        h += 15;
+                        while (h < i && srv_req[h] == ' ') h++;
+                        while (h < i && srv_req[h] >= '0' && srv_req[h] <= '9')
+                            clen = clen * 10 + (u32)(srv_req[h++] - '0');
+                        break;
+                        }
+                    }
+                }
+                if (srv_reqlen < body_start + clen) return;   /* wait for the body */
                 srv_respond();
                 return;
             }

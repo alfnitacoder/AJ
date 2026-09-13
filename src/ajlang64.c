@@ -12,11 +12,60 @@ typedef unsigned short u16;
 typedef unsigned int   u32;
 typedef unsigned long long u64;
 
+static int strcmp64(const char *a, const char *b);
+
 extern void *kmalloc64(unsigned long long n);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern int tcp64_http_get_body(unsigned int ip, unsigned short port,
                                const char *path, char *out, unsigned short cap);
 extern int fat64_write_file(const char *name, const void *data, unsigned int len);
+
+/* ---- query parameters (set by the web handler, read by the scripts) ---- */
+#define MAXQ 8
+static struct { char k[32]; char v[96]; } qtab[MAXQ];
+static int nq;
+
+static void ser_puts(const char *s);
+static void ser_put_dec(unsigned long long v);
+
+void ajlang64_set_query(const char *k, const char *v)
+{
+    int i;
+    for (i = 0; i < nq; i++)
+        if (!strcmp64(qtab[i].k, k)) {
+            int j = 0;
+            while (v[j] && j < 95) { qtab[i].v[j] = v[j]; j++; }
+            qtab[i].v[j] = 0;
+            return;
+        }
+    if (nq < MAXQ) {
+        int j = 0;
+        while (k[j] && j < 31) { qtab[nq].k[j] = k[j]; j++; }
+        qtab[nq].k[j] = 0;
+        j = 0;
+        while (v[j] && j < 95) { qtab[nq].v[j] = v[j]; j++; }
+        qtab[nq].v[j] = 0;
+        ser_puts(" [qset] k=");
+        ser_puts(qtab[nq].k);
+        ser_puts(" v=");
+        ser_puts(qtab[nq].v);
+        ser_puts("\n");
+        nq++;
+    }
+}
+
+void ajlang64_clear_query(void)
+{
+    nq = 0;
+}
+
+static const char *ajlang64_get_query(const char *k)
+{
+    int i;
+    for (i = 0; i < nq; i++)
+        if (!strcmp64(qtab[i].k, k)) return qtab[i].v;
+    return "";
+}
 
 #define COM1 0x3F8
 static inline void outb(u16 port, u8 val)
@@ -146,7 +195,8 @@ static void lex(const char *src)
 
 /* ---- AST ---- */
 typedef enum { N_NUM, N_STR, N_VAR, N_BIN, N_STRLEN, N_STRCAT, N_NUMCVT,
-               N_FREAD, N_HTTPGET, N_STRFIND, N_STRSUB, N_FILEWRITE } ntype;
+               N_FREAD, N_HTTPGET, N_STRFIND, N_STRSUB, N_FILEWRITE,
+               N_QUERY } ntype;
 
 typedef struct node {
     ntype t;
@@ -165,8 +215,6 @@ typedef struct stmt {
 } stmt;
 
 typedef struct { long num; char *str; int is_str; } val_t;
-
-static int strcmp64(const char *a, const char *b);
 
 #define MAXVAR 32
 static struct { char name[32]; val_t v; } vars[MAXVAR];
@@ -272,6 +320,14 @@ static node *parse_primary(void)
         if (!strcmp64(t->str, "http_get") && toks[tp + 1].kind == 3 &&
             toks[tp + 1].op == '(') {
             node *n = node_new(N_HTTPGET);
+            tp += 2;
+            n->l = parse_expr();
+            if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
+            return n;
+        }
+        if (!strcmp64(t->str, "query") && toks[tp + 1].kind == 3 &&
+            toks[tp + 1].op == '(') {
+            node *n = node_new(N_QUERY);
             tp += 2;
             n->l = parse_expr();
             if (toks[tp].kind == 3 && toks[tp].op == ')') tp++;
@@ -543,6 +599,19 @@ static val_t eval(node *n, int depth)
         if (a.is_str) {
             int code = tcp64_http_get_body(target, 8130, a.str, hb, sizeof(hb));
             if (code == 200) return v_str(hb);
+        }
+        return v_str((char *)"");
+    }
+    case N_QUERY: {
+        val_t a = eval(n->l, depth + 1);
+        ser_puts(" [q] key=");
+        ser_puts(a.is_str ? a.str : "(num)");
+        {
+            const char *gv = ajlang64_get_query(a.str);
+            ser_puts(" val=");
+            ser_puts(gv);
+            ser_puts("\n");
+            if (a.is_str) return v_str((char *)gv);
         }
         return v_str((char *)"");
     }

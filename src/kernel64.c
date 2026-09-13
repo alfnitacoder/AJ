@@ -28,6 +28,8 @@ extern void tcp64_serve_start(unsigned short port);
 extern void tcp64_set_handler(int (*fn)(const char *req, char *out, unsigned short cap));
 extern void ajlang64_set_output(char *buf, unsigned short cap);
 extern void ajlang64_output_off(void);
+extern void ajlang64_clear_query(void);
+extern void ajlang64_set_query(const char *k, const char *v);
 extern unsigned short ajlang64_output_len(void);
 extern void tcp64_serve_start(unsigned short port);
 extern void tcp64_set_handler(int (*fn)(const char *req, char *out, unsigned short cap));
@@ -47,9 +49,62 @@ static int web_route(const char *script, char *out, unsigned short cap)
     return (int)n;
 }
 
+/* extract one URL-encoded param from an "a=1&b=2" body/query string */
+static int body_param(const char *body, const char *key, char *out, int cap)
+{
+    int i = 0, j;
+    while (body[i]) {
+        j = 0;
+        while (body[i + j] && body[i + j] != '=' && body[i + j] != '&') {
+            if (key[j] != body[i + j]) break;
+            j++;
+        }
+        if (key[j] == 0 && body[i + j] == '=') {
+            int o = 0;
+            i += j + 1;
+            while (body[i] && body[i] != '&' && o < cap - 1) {
+                char c = body[i];
+                if (c == '+') { out[o++] = ' '; i++; }
+                else if (c == '%' && body[i + 1] && body[i + 2]) {
+                    u8 hi = (u8)body[i + 1], lo = (u8)body[i + 2];
+                    hi = (u8)((hi >= '0' && hi <= '9') ? hi - '0' :
+                              (hi | 0x20) - 'a' + 10);
+                    lo = (u8)((lo >= '0' && lo <= '9') ? lo - '0' :
+                              (lo | 0x20) - 'a' + 10);
+                    out[o++] = (u8)((hi << 4) | lo);
+                    i += 3;
+                } else { out[o++] = c; i++; }
+            }
+            out[o] = 0;
+            return o;
+        }
+        while (body[i] && body[i] != '&') i++;
+        if (body[i] == '&') i++;
+    }
+    return -1;
+}
+
 static int web_handler(const char *req, char *out, unsigned short cap)
 {
-    /* routes: GET / -> WEB.TXT, GET /count -> COUNT.AJ (persistent counter) */
+    /* routes: GET / -> WEB.TXT (form + entries), POST /gb -> GBAPP.TXT,
+     * GET /count -> HITS.TXT (persistent counter) */
+    ajlang64_clear_query();
+    if (req[0] == 'P' && req[1] == 'O' && req[2] == 'S' && req[3] == 'T' &&
+        req[4] == ' ' && req[5] == '/' && req[6] == 'g' && req[7] == 'b') {
+        u16 i;
+        for (i = 0; i + 3 < 1400 && req[i]; i++) {
+            if (req[i] == '\r' && req[i + 1] == '\n' &&
+                req[i + 2] == '\r' && req[i + 3] == '\n') {
+                char namev[64], msgv[128];
+                int n1 = body_param(req + i + 4, "name", namev, sizeof(namev));
+                int n2 = body_param(req + i + 4, "msg", msgv, sizeof(msgv));
+                if (n1 >= 0) ajlang64_set_query("name", namev);
+                if (n2 >= 0) ajlang64_set_query("msg", msgv);
+                break;
+            }
+        }
+        return web_route("GBAPP.TXT", out, cap);
+    }
     if (req[0] == 'G' && req[1] == 'E' && req[2] == 'T' &&
         req[3] == ' ' && req[4] == '/' &&
         (req[5] == ' ' || req[5] == '?'))
@@ -164,8 +219,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 13\n");
-    serial_puts(" (stateful web app: persistent visit counter)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 14\n");
+    serial_puts(" (guestbook web app: POST, query params, persistence)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
