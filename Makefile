@@ -232,7 +232,7 @@ run64: $(OS64_IMG)
 test64: $(OS64_IMG) $(UPBIN)
 	@mkdir -p build/htdoc
 	@printf '<html><body>AJOS64-HTTP-TEST-PAGE</body></html>\n' > build/htdoc/index.html
-	@pkill -f "http.server 8130" 2>/dev/null; sleep 1; true
+	@pkill -f '[h]ttp.server 8130' 2>/dev/null; sleep 1; true
 	@mkdir -p build/data64_staging
 	@mkdir -p build/data64_staging/data
 	@printf 'AJOS64-DISK-READS-OK\n' > build/data64_staging/data/HELLO.TXT
