@@ -219,8 +219,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 14\n");
-    serial_puts(" (guestbook web app: POST, query params, persistence)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 16\n");
+    serial_puts(" (fork/execve/waitpid, preemptive ring-3 scheduler)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -458,9 +458,14 @@ void kernel_main64(void)
         serial_puts(" web server: listening on :80 (routes / and /count (persistent))\n");
     }
 
-    /* ---- M10: ring 3 user program + syscall/sysret ---- */
-    serial_puts(" M10: user program (ring 3)\n");
+    /* ---- M16: scheduled ring-3 processes, then the M10 round trip ---- */
+    serial_puts(" M16: fork/execve/waitpid + preemptive scheduler\n");
     user64_init();
+    {
+        extern void proc64_boot_test(void);
+        proc64_boot_test();
+    }
+    serial_puts(" M10: user program (ring 3)\n");
     user64_start();
     /* noreturn: the user exits via the syscall, which lands in the shell */
 

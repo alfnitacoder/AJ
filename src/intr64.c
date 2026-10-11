@@ -138,6 +138,12 @@ void irq64_dispatch(u64 irq)
     }
 }
 
+/* IRQ0 is taken by the preemption stub (proc64_on_timer), not irq64_dispatch. */
+void timer64_tick(void)
+{
+    timer_ticks++;
+}
+
 static void pic_remap(void)
 {
     outb(0x20, 0x11); outb(0xA0, 0x11);   /* ICW1: cascade, ICW4 */
