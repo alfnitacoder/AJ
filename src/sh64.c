@@ -12,7 +12,13 @@ extern int ata64_init(void);
 extern int fat64_init(void);
 extern int fat64_read_file(const char *name, void *out, unsigned int cap);
 extern int ajlang64_run(const char *name);
-extern void user64_exec(const unsigned char *img, unsigned int size);
+extern int proc64_spawn(const unsigned char *img, unsigned int size,
+                       const char *name, int bg);
+extern void proc64_ps(void);
+extern int proc64_kill(unsigned int pid);
+extern int proc64_shell_wait(unsigned int pid, unsigned int *code);
+extern void proc64_shell_poll(void);
+extern void sh64_switch_stack(void *top, void (*fn)(void));
 extern void tcp64_server_pump(void);
 extern void net64_poll(void);
 extern void fat64_list(void);
@@ -74,7 +80,8 @@ static void sh_prompt(void)
 
 static void cmd_help(void)
 {
-    ser_puts(" commands: help ls cat FILE aj SCRIPT run BIN.UP mem ping http uptime echo clear\n");
+    ser_puts(" commands: help ls cat FILE aj SCRIPT run BIN [&] ps kill PID wait [PID]\n");
+    ser_puts("           mem ping http uptime echo clear\n");
     ser_puts(" ping/http target the slirp gateway 10.0.2.2\n");
 }
 
@@ -151,6 +158,116 @@ static void cmd_cat(const char *name)
     }
 }
 
+static void trim(char *s)
+{
+    char *e;
+    while (*s == ' ') {
+        char *p = s;
+        while (*p) { p[0] = p[1]; p++; }
+    }
+    e = s;
+    while (*e) e++;
+    while (e > s && e[-1] == ' ') { e--; *e = 0; }
+}
+
+static int parse_u32(const char *s, u32 *out)
+{
+    u32 v = 0;
+    if (!s || !*s) return 0;
+    while (*s == ' ') s++;
+    if (*s < '0' || *s > '9') return 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10u + (u32)(*s - '0');
+        s++;
+    }
+    while (*s == ' ') s++;
+    if (*s) return 0;
+    *out = v;
+    return 1;
+}
+
+static int starts(const char *s, const char *pfx)
+{
+    while (*pfx) {
+        if (*s++ != *pfx++) return 0;
+    }
+    return 1;
+}
+
+static void cmd_run(char *arg)
+{
+    static unsigned char prog[4096];
+    int bg = 0;
+    int n, rc;
+    char *end;
+    trim(arg);
+    end = arg;
+    while (*end) end++;
+    if (end > arg && end[-1] == '&') {
+        bg = 1;
+        end[-1] = 0;
+        trim(arg);
+    }
+    if (!*arg) {
+        ser_puts(" usage: run FILE [&]\n");
+        return;
+    }
+    n = fat64_read_file(arg, prog, sizeof(prog));
+    if (n <= 0) {
+        ser_puts(" run: not found\n");
+        return;
+    }
+    rc = proc64_spawn(prog, (unsigned int)n, arg, bg);
+    if (rc < 0) {
+        ser_puts(" run: failed\n");
+        return;
+    }
+    if (bg) {
+        ser_puts(" bg pid ");
+        ser_put_dec((u64)rc);
+        ser_puts("\n");
+    } else {
+        ser_puts(" exit ");
+        ser_put_dec((u64)rc);
+        ser_puts("\n");
+    }
+}
+
+static void cmd_kill(char *arg)
+{
+    u32 pid = 0;
+    trim(arg);
+    if (!parse_u32(arg, &pid) || proc64_kill(pid) != 0) {
+        ser_puts(" usage: kill PID\n");
+        return;
+    }
+    ser_puts(" killed ");
+    ser_put_dec(pid);
+    ser_puts("\n");
+}
+
+static void cmd_wait(char *arg)
+{
+    u32 pid = 0;
+    u32 code = 0;
+    int id;
+    trim(arg);
+    if (*arg && !parse_u32(arg, &pid)) {
+        ser_puts(" usage: wait [PID]\n");
+        return;
+    }
+    id = proc64_shell_wait(pid, &code);
+    if (id < 0) {
+        ser_puts(" wait: no child\n");
+        return;
+    }
+    ser_puts(" wait: reaped ");
+    ser_put_dec((u64)id);
+    ser_puts(" code ");
+    ser_put_dec(code);
+    ser_puts("\n");
+}
+
 static void exec_line(char *l)
 {
     /* trim leading spaces */
@@ -174,35 +291,30 @@ static void exec_line(char *l)
     }
     if (l[0] == 'c' && l[1] == 'a' && l[2] == 't' && l[3] == ' ') { cmd_cat(l + 4); return; }
     if (l[0] == 'a' && l[1] == 'j' && l[2] == ' ') { ajlang64_run(l + 3); return; }
-    if (l[0] == 'r' && l[1] == 'u' && l[2] == 'n' && l[3] == ' ') {
-        static unsigned char prog[4096];
-        int n = fat64_read_file(l + 4, prog, sizeof(prog));
-        if (n > 0) user64_exec(prog, (unsigned int)n);
-        else ser_puts(" run: not found\n");
+    if (starts(l, "run ") || (l[0] == 'r' && l[1] == 'u' && l[2] == 'n' && l[3] == 0)) {
+        cmd_run(l + 3);
         return;
     }
+    if (l[0] == 'p' && l[1] == 's' && (l[2] == 0 || l[2] == ' ')) { proc64_ps(); return; }
+    if (starts(l, "kill")) { cmd_kill(l + 4); return; }
+    if (starts(l, "wait")) { cmd_wait(l + 4); return; }
     if (l[0] == 'e' && l[1] == 'c' && l[2] == 'h' && l[3] == 'o') { ser_puts(l + 4); ser_puts("\n"); return; }
     ser_puts(" unknown: ");
     ser_puts(l);
     ser_puts(" (try help)\n");
 }
 
-void sh64_run(void)
+static void shell_main(void)
 {
-    /* Disk program after ring-3 init. Doing this earlier ltr's a TSS
-     * descriptor that user64_init has not installed yet and triple-faults
-     * immediately after the data-cluster read. */
+    /* Disk program after ring-3 init. A scheduled foreground run returns
+     * to this same loop; exit does not start a nested shell. */
     {
         static int autoran;
         if (!autoran) {
-            static unsigned char prog[4096];
-            int n;
+            char name[] = "HELLO64.UP";
             autoran = 1;
-            n = fat64_read_file("HELLO64.UP", prog, sizeof(prog));
-            if (n > 0) {
-                ser_puts(" exec: running HELLO64.UP from disk\n");
-                user64_exec(prog, (unsigned int)n);
-            }
+            ser_puts(" exec: running HELLO64.UP from disk\n");
+            cmd_run(name);
         }
     }
     ser_puts("\n sh64 ready - type help\n");
@@ -228,7 +340,14 @@ void sh64_run(void)
         } else {
             net64_poll();
             tcp64_server_pump();
+            proc64_shell_poll();
             __asm__ __volatile__("sti; hlt");
         }
     }
+}
+
+void sh64_run(void)
+{
+    static u8 shell_stack[16384] __attribute__((aligned(16)));
+    sh64_switch_stack(shell_stack + sizeof(shell_stack), shell_main);
 }
