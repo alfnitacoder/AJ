@@ -189,12 +189,28 @@ static void exec_line(char *l)
 
 void sh64_run(void)
 {
+    /* Disk program after ring-3 init. Doing this earlier ltr's a TSS
+     * descriptor that user64_init has not installed yet and triple-faults
+     * immediately after the data-cluster read. */
+    {
+        static int autoran;
+        if (!autoran) {
+            static unsigned char prog[4096];
+            int n;
+            autoran = 1;
+            n = fat64_read_file("HELLO64.UP", prog, sizeof(prog));
+            if (n > 0) {
+                ser_puts(" exec: running HELLO64.UP from disk\n");
+                user64_exec(prog, (unsigned int)n);
+            }
+        }
+    }
     ser_puts("\n sh64 ready - type help\n");
     sh_prompt();
     for (;;) {
         int c = serial_getc_nb();
         if (c >= 0) {
-            if (c == '\\r' || c == '\n') {
+            if (c == '\r' || c == '\n') {
                 ser_puts("\n");
                 line[line_len] = 0;
                 exec_line(line);
