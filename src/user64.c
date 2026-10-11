@@ -158,40 +158,6 @@ void user64_init(void)
     ser_puts(" user-64: syscall/sysret enabled (STAR/LSTAR/FMASK)\n");
 }
 
-/* the C syscall handler: called from syscall_entry with (nr, a1, a2) */
-extern unsigned long long dbg_rcx;
-extern unsigned long long user_rsp_save;
-
-u64 syscall_handler(u64 nr, u64 a1, u64 a2)
-{
-    ser_puts(" [sys] nr=");
-    ser_put_dec(nr);
-    ser_puts(" rcx=");
-    {
-        u64 v = dbg_rcx, sh = 60;
-        static const char hd[] = "0123456789abcdef";
-        ser_putc('0'); ser_putc('x');
-        for (; (long)sh >= 0; sh -= 4) ser_putc(hd[(v >> sh) & 0xF]);
-    }
-    ser_puts(" rsp_save=");
-    ser_put_hex(user_rsp_save);
-    ser_puts("\n");
-    if (nr == 1) {                          /* write */
-        const char *p = (const char *)a1;
-        u64 n = a2, i;
-        for (i = 0; i < n; i++) ser_putc(p[i]);
-        return n;
-    }
-    if (nr == 2) {                          /* exit */
-        ser_puts("\n [ring3] exit(");
-        ser_put_dec(a1);
-        ser_puts(") - RING3-SYSCALL-OK\n");
-        ser_puts(" returning to the shell...\n");
-        sh64_run();                         /* noreturn */
-    }
-    return (u64)-1;
-}
-
 /* Map fresh pages and jump into a user image (never returns: the exit
  * syscall continues in a fresh shell). Position-independent images only
  * (rip-relative), loaded at USER_BASE. */

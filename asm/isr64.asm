@@ -6,6 +6,7 @@
 [global isr64_stub_table]
 [extern isr64_dispatch]
 [extern irq64_dispatch]
+[extern proc64_on_timer]
 
 ; The C dispatchers follow the SysV ABI and may clobber the volatile
 ; registers, so every stub saves/restores them. 9 pushes (72 bytes) +
@@ -106,8 +107,45 @@ ISR64_NOERR 29
 ISR64_NOERR 30
 ISR64_NOERR 31
 
-; IRQs 0..15 -> vectors 32..47
-ISR64_IRQ 32
+; IRQ0 (vector 32) saves every GPR so the scheduler can preempt ring 3
+; by rewriting the frame. IRQs 1..15 stay on the thin stub (they are masked).
+isr64_stub_32:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    cld
+    call proc64_on_timer
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
+
+; IRQs 1..15 -> vectors 33..47
 ISR64_IRQ 33
 ISR64_IRQ 34
 ISR64_IRQ 35

@@ -31,6 +31,10 @@ FAT64_SRC = $(SRC_DIR)/fat64.c
 SH64_SRC = $(SRC_DIR)/sh64.c
 AJ64_SRC = $(SRC_DIR)/ajlang64.c
 USER64C_SRC = $(SRC_DIR)/user64.c
+PROC64_SRC = $(SRC_DIR)/proc64.c
+PROC64A_SRC = $(ASM_DIR)/proc64.asm
+FORKDEMO64_SRC = $(ASM_DIR)/forkdemo64.asm
+CHILD64_SRC = $(ASM_DIR)/child64.asm
 USER64_SRC = asm/user64.asm
 USER64_ENTRY_SRC = asm/user64_entry.asm
 USERPROG_SRC = asm/userprog.asm
@@ -49,6 +53,12 @@ FAT64_OBJ = $(BUILD_DIR)/fat64.o
 SH64_OBJ = $(BUILD_DIR)/sh64.o
 AJ64_OBJ = $(BUILD_DIR)/ajlang64.o
 USER64C_OBJ = $(BUILD_DIR)/user64c.o
+PROC64_OBJ = $(BUILD_DIR)/proc64.o
+PROC64A_OBJ = $(BUILD_DIR)/proc64a.o
+FORKDEMO64_BIN = $(BUILD_DIR)/forkdemo64.bin
+CHILD64_BIN = $(BUILD_DIR)/child64.bin
+FORKDEMO64_OBJ = $(BUILD_DIR)/forkdemo64.o
+CHILD64_OBJ = $(BUILD_DIR)/child64.o
 USER64_BIN = $(BUILD_DIR)/user64.bin
 USERPROG_OBJ = $(BUILD_DIR)/userprog64.o
 UPBIN = $(BUILD_DIR)/userprog.bin
@@ -197,6 +207,24 @@ $(AJ64_OBJ): $(AJ64_SRC)
 $(USER64C_OBJ): $(USER64C_SRC)
 	$(CC) $(CFLAGS64) -c $< -o $@
 
+$(PROC64_OBJ): $(PROC64_SRC)
+	$(CC) $(CFLAGS64) -c $< -o $@
+
+$(PROC64A_OBJ): $(PROC64A_SRC)
+	$(AS) $(ASFLAGS64) $< -o $@
+
+$(FORKDEMO64_BIN): $(FORKDEMO64_SRC)
+	$(AS) -f bin $< -o $@
+
+$(CHILD64_BIN): $(CHILD64_SRC)
+	$(AS) -f bin $< -o $@
+
+$(FORKDEMO64_OBJ): $(FORKDEMO64_BIN)
+	cd $(BUILD_DIR) && $(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.forkdemo,alloc,load,readonly,data,contents forkdemo64.bin forkdemo64.o
+
+$(CHILD64_OBJ): $(CHILD64_BIN)
+	cd $(BUILD_DIR) && $(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.child64,alloc,load,readonly,data,contents child64.bin child64.o
+
 $(USER64_BIN): $(USER64_SRC)
 	$(AS) -f bin $< -o $@
 
@@ -209,7 +237,7 @@ $(UPBIN): $(USERPROG_SRC)
 $(USERPROG_OBJ): $(USER64_BIN)
 	cd $(BUILD_DIR) && $(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.userprog,alloc,load,readonly,data,contents user64.bin userprog64.o
 
-$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ) $(TCP64_OBJ) $(ATA64_OBJ) $(FAT64_OBJ) $(SH64_OBJ) $(AJ64_OBJ) $(USER64C_OBJ) $(USER64_ENTRY_OBJ) $(USERPROG_OBJ)
+$(KERNEL64_ELF): $(KERNEL64_ENTRY_OBJ) $(BUILD_DIR)/kernel64.o $(ISR64_OBJ) $(INTR64_OBJ) $(PMM64_OBJ) $(VM64_OBJ) $(E1000_64_OBJ) $(NET64_OBJ) $(TCP64_OBJ) $(ATA64_OBJ) $(FAT64_OBJ) $(SH64_OBJ) $(AJ64_OBJ) $(USER64C_OBJ) $(USER64_ENTRY_OBJ) $(USERPROG_OBJ) $(PROC64_OBJ) $(PROC64A_OBJ) $(FORKDEMO64_OBJ) $(CHILD64_OBJ)
 	$(LD) $(LDFLAGS64) -o $@ $^
 
 $(KERNEL64_BIN): $(KERNEL64_ELF)
@@ -247,7 +275,7 @@ test64: $(OS64_IMG) $(UPBIN)
 	@printf 'var n = num(file_read("VISITS.TXT"))\nvar n2 = n + 1\nfile_write("VISITS.TXT", "" + n2)\nprint "VISIT " + n2\n' > build/data64_staging/data/HITS.TXT
 	@printf '0' > build/data64_staging/data/VISITS.TXT
 	@cd build/data64_staging && python3 ../../tools/mkfat12.py ../data64.img --size-mb 4 >/dev/null 2>&1; true
-	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 80; curl -s -m 5 -d "name=Tester&msg=HELLO-FROM-BROWSER" http://127.0.0.1:8080/gb > build/gbpost.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/ > build/web80.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count1.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count2.txt 2>/dev/null; sleep 6; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "GB-SAVED" build/gbpost.txt && grep -q "Tester: HELLO-FROM-BROWSER" build/web80.txt && grep -q "VISIT 1" build/count1.txt && grep -q "VISIT 2" build/count2.txt && grep -q "AJOS64 Guestbook" build/web80.txt && grep -q "LONG MODE MILESTONE 14" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && grep -q "sh64 ready" build/serial64.log && grep -q "AJLANG64-RUN-OK" build/serial64.log && grep -q "THE-ANSWER" build/serial64.log && grep -q "AJOS64-HTTP-TEST-PAGE" build/serial64.log && grep -q "STR-BUILTINS-OK" build/serial64.log && grep -q "HELLO-FROM-RING3" build/serial64.log && grep -q "RING3-SYSCALL-OK" build/serial64.log && grep -q "WRITE-BACK-OK-11" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
+	@HOSTIP=$$(ipconfig getifaddr en0 2>/dev/null | head -1); if [ -z "$$HOSTIP" ]; then HOSTIP=10.0.2.2; fi; echo "test64: host ip = $$HOSTIP"; python3 -c "f=open('$(OS64_IMG)','r+b'); f.seek(900*512); f.write(bytes(int(x) for x in '$$HOSTIP'.split('.'))); f.close()"; (exec python3 tools/httpsrv.py 8130 >/dev/null 2>&1) & SPID=$$!; sleep 1; $(QEMU64_RUN) -m 512M -boot a -drive file=$(OS64_IMG),format=raw,if=floppy -drive file=build/data64.img,format=raw,if=ide $(QEMU64_NET) -no-reboot -monitor none -serial file:build/serial64.log -display none & QPID=$$!; sleep 80; curl -s -m 5 -d "name=Tester&msg=HELLO-FROM-BROWSER" http://127.0.0.1:8080/gb > build/gbpost.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/ > build/web80.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count1.txt 2>/dev/null; curl -s -m 4 http://127.0.0.1:8080/count > build/count2.txt 2>/dev/null; sleep 6; kill $$QPID 2>/dev/null; kill $$SPID 2>/dev/null; wait 2>/dev/null; grep -q "GB-SAVED" build/gbpost.txt && grep -q "Tester: HELLO-FROM-BROWSER" build/web80.txt && grep -q "VISIT 1" build/count1.txt && grep -q "VISIT 2" build/count2.txt && grep -q "AJOS64 Guestbook" build/web80.txt && grep -q "LONG MODE MILESTONE 16" build/serial64.log && grep -q "FORK-WAIT-OK-16" build/serial64.log && grep -q "EXECVE-OK-16" build/serial64.log && grep -q "PREEMPT-OK-16" build/serial64.log && grep -q "M16-RETURN-OK" build/serial64.log && grep -q "DISK READ TEST: PASS" build/serial64.log && grep -q "HTTP 200 TEST PASS" build/serial64.log && grep -q "sh64 ready" build/serial64.log && grep -q "AJLANG64-RUN-OK" build/serial64.log && grep -q "THE-ANSWER" build/serial64.log && grep -q "AJOS64-HTTP-TEST-PAGE" build/serial64.log && grep -q "STR-BUILTINS-OK" build/serial64.log && grep -q "HELLO-FROM-RING3" build/serial64.log && grep -q "RING3-SYSCALL-OK" build/serial64.log && grep -q "WRITE-BACK-OK-11" build/serial64.log && echo "TEST64 PASS: long mode + HTTP 200 over TCP" || (echo "TEST64 FAIL"; exit 1)
 
 # Default host port forwards for QEMU user networking (override if port in use):
 #   make run-console HOST_HTTP_PORT=9080 HOST_SSH_PORT=9022

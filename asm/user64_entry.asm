@@ -1,31 +1,63 @@
 ; user64_entry.asm - ring0 <-> ring3 transitions for the AJOS x86-64 port.
 ; jump_to_user: iretq into ring 3 (the frame pushed by hand).
-; syscall_entry: LSTAR target; switches to the kernel stack, dispatches
-; to the C syscall_handler(nr, a1, a2), then sysretq back.
+; syscall_entry: LSTAR target. Snapshots the user register file into
+; proc64_snap (syscall clobbers rcx/r11; rsp is still the user stack),
+; switches to the kernel stack, and calls syscall_handler. A normal
+; return iretqs back with the real user RSP. fork/wait/exit may instead
+; iretq into a different process and never return here.
 
 [global syscall_entry]
 [global jump_to_user]
 [extern syscall_handler]
+[extern proc64_snap]
 
 [bits 64]
 section .text
 syscall_entry:
-    mov [rel dbg_rcx], rcx
-    mov rsp, [rel sys_rsp0]         ; switch to the kernel stack
-    push rcx                        ; the user rip
-    push r11                        ; the user rflags
-    mov rdi, rax                    ; the C handler(nr, a1=rsi, a2=rdx)
-    call syscall_handler
-    pop r11
-    pop rcx
-    ; return via iretq: build the ring3 frame by hand (the user rsp is the
-    ; fixed initial stack top; the milestone programs never move it)
+    ; uctx slots: see proc64.c / proc64_iret_user. rcx = return RIP, r11 = RFLAGS.
+    mov [rel proc64_snap + 56], rsp
+    mov [rel proc64_snap + 128], rcx
+    mov [rel proc64_snap + 136], r11
+    mov [rel proc64_snap + 0], rax
+    mov [rel proc64_snap + 8], rbx
+    mov [rel proc64_snap + 16], rcx
+    mov [rel proc64_snap + 24], rdx
+    mov [rel proc64_snap + 32], rsi
+    mov [rel proc64_snap + 40], rdi
+    mov [rel proc64_snap + 48], rbp
+    mov [rel proc64_snap + 64], r8
+    mov [rel proc64_snap + 72], r9
+    mov [rel proc64_snap + 80], r10
+    mov [rel proc64_snap + 88], r11
+    mov [rel proc64_snap + 96], r12
+    mov [rel proc64_snap + 104], r13
+    mov [rel proc64_snap + 112], r14
+    mov [rel proc64_snap + 120], r15
     mov rsp, [rel sys_rsp0]
-    push 0x23                       ; user SS
-    push 0x10000101000              ; user RSP (USER_STACK + 4096)
-    push r11                        ; RFLAGS
-    push 0x2B                       ; user CS
-    push rcx                        ; user RIP
+    mov rdi, rax                    ; syscall_handler(nr); args live in the snap
+    call syscall_handler
+    ; rax = return value. Restore every other GPR from the snap so a
+    ; syscall preserves the user register file (rcx/r11 are the iretq vehicles).
+    mov rbx, [rel proc64_snap + 8]
+    mov rdx, [rel proc64_snap + 24]
+    mov rsi, [rel proc64_snap + 32]
+    mov rdi, [rel proc64_snap + 40]
+    mov rbp, [rel proc64_snap + 48]
+    mov r8,  [rel proc64_snap + 64]
+    mov r9,  [rel proc64_snap + 72]
+    mov r10, [rel proc64_snap + 80]
+    mov r12, [rel proc64_snap + 96]
+    mov r13, [rel proc64_snap + 104]
+    mov r14, [rel proc64_snap + 112]
+    mov r15, [rel proc64_snap + 120]
+    mov rcx, [rel proc64_snap + 128]    ; user RIP
+    mov r11, [rel proc64_snap + 136]    ; user RFLAGS
+    mov rsp, [rel sys_rsp0]
+    push qword 0x23                     ; user SS
+    push qword [rel proc64_snap + 56]   ; user RSP
+    push r11
+    push qword 0x2B                     ; user CS
+    push rcx
     iretq
 
 jump_to_user:                       ; rdi = the entry rip, rsi = the user rsp
