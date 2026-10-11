@@ -37,6 +37,18 @@ proc_restore_kernel:
 ; uctx layout (8-byte slots):
 ;   0 rax, 8 rbx, 16 rcx, 24 rdx, 32 rsi, 40 rdi, 48 rbp, 56 rsp,
 ;   64 r8 .. 120 r15, 128 rip, 136 rflags
+; void sh64_switch_stack(void *top, void (*fn)(void));
+; The serial shell runs on its own stack so a foreground process can reuse
+; the syscall/IRQ stack (sys_rsp0) without clobbering the shell frame.
+global sh64_switch_stack
+sh64_switch_stack:
+    mov rsp, rdi
+    call rsi
+.hang:
+    cli
+    hlt
+    jmp .hang
+
 global proc64_iret_user
 proc64_iret_user:
     cli

@@ -219,8 +219,8 @@ void kernel_main64(void)
 
     serial_puts("\n");
     serial_puts("================================================\n");
-    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 16\n");
-    serial_puts(" (fork/execve/waitpid, preemptive ring-3 scheduler)\n");
+    serial_puts(" AJOS x86-64 :: LONG MODE MILESTONE 17\n");
+    serial_puts(" (shell jobs: run returns, ps/kill/wait, background)\n");
     serial_puts("================================================\n");
 
     /* CPU info (kept from M1) */
@@ -464,6 +464,10 @@ void kernel_main64(void)
     {
         extern void proc64_boot_test(void);
         proc64_boot_test();
+    }
+    {
+        extern void proc64_m17_test(void);
+        proc64_m17_test();
     }
     serial_puts(" M10: user program (ring 3)\n");
     user64_start();

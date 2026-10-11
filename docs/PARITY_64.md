@@ -24,7 +24,7 @@ The 32-bit kernel is the feature-complete AJOS image (SSH/SFTP, processes, TLS, 
 
 Still only on the 32-bit side:
 
-- **Processes.** `fork` / `execve` / `waitpid`, per-process user frames, preemption on the ring-3 timer boundary, `sleep` that blocks, `ps` / `kill` / `wait`, background jobs. (Milestone 16 starts this. The shell `run` command is still the milestone 15 loader.)
+- **Processes.** `fork` / `execve` / `waitpid`, per-process user frames, preemption on the ring-3 timer boundary, blocking `sleep`, and shell `ps` / `kill` / `wait` / background `run` are in milestones 16 and 17. Still missing: private address spaces, images past one page, and `argv`.
 - **Address space.** 32-bit tasks each get a private page directory. 64-bit tasks share one user window that is remapped on switch.
 - **Images.** 32-bit AJOSBIN programs use a multi-page window. 64-bit user programs are one 4 KB code page and one 4 KB stack.
 - **AJLang.** 64-bit has `var`/`print`/`if`/`else`/`while`, arithmetic and comparisons, `str_len`/`str_cat`/`str_find`/`str_sub`, `num`, `file_read`/`file_write`, `http_get`, `query`. 32-bit also has `for`, `def`/`return`, `and`/`or`/`not`, `input`, `import` and `/opt` packages, `dns()`, `http_get_save()`, `edit()`.
@@ -56,16 +56,24 @@ Syscall numbers in 64-bit (the 32-bit `int 0x80` register convention is differen
 | 16 | `fork` (child gets 0, parent gets the pid) |
 | 17 | `execve` (`rdi` = path; embedded name or a FAT file) |
 | 18 | `waitpid` (`rdi` = pid or 0, `rsi` = `u64 *` status) |
+| 19 | `ps` (lists the process table; milestone 17) |
 
 Deliberately not in this milestone: private CR3s, images bigger than 4 KB, `argv`, COW, shell `ps`/`kill`, and making `run` return to the shell. A process-less `exit` (the milestone 10 demo and `run`) still enters the shell.
 
 **test64:** `FORK-WAIT-OK-16`, `EXECVE-OK-16`, `PREEMPT-OK-16`, `M16-RETURN-OK`, and the banner `LONG MODE MILESTONE 16`.
 
-## Milestone 17 — shell job control
+## Milestone 17 — shell job control (implemented)
 
-Wire the scheduler into the serial shell. `run FILE` spawns a foreground process and returns to the **same** shell when it exits (today `exit` with no process starts a nested `sh64`). Add `ps`, `kill`, `wait`, and `cmd &`. `sleep` from a program must block in the scheduler instead of spinning.
+The serial shell schedules programs instead of nesting a new `sh64` on `exit`.
 
-**test64:** a boot-spawned parent prints `SLEEP-OK-17` after a child blocks in `sleep` for at least 200 ms, then `WAIT-BG-OK-17` from `waitpid` of that child. Serial also contains a `ps` line `PS-OK-17` taken while the child is still alive.
+- `run FILE` loads a FAT image, runs it as a foreground process, and returns to the **same** shell loop with `exit CODE`.
+- `run FILE &` returns immediately and prints `bg pid N`. The idle loop runs background jobs for one quantum at a time so the NIC pump still runs.
+- `ps` lists the process table. `kill PID` zombies a job (exit code 9). `wait` and `wait PID` reap a shell child.
+- The shell runs on its own stack so a foreground `syscall` cannot overwrite the shell frame.
+- A process-less `exit` (the milestone 10 demo) is still what enters the shell the first time.
+- Boot program `JOB17` forks a child that blocks in `sleep(300)`. The parent sleeps 30 ms, calls `ps` while the child is asleep, then `waitpid`. Syscall 19 is that `ps`.
+
+**test64:** `SLEEP-OK-17`, `WAIT-BG-OK-17`, and `PS-OK-17`, plus the milestone 16 strings. The banner line is `LONG MODE MILESTONE 17`.
 
 ## Milestone 18 — private address spaces
 

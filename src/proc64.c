@@ -47,6 +47,7 @@ struct proc {
     u64 wstatus;         /* user virtual address of the status word */
     u64 code_phys;
     u64 stack_phys;
+    int background;          /* spawned by the shell with '&' */
     char name[16];
     struct uctx ctx;
 };
@@ -70,6 +71,8 @@ extern u8 _binary_forkdemo64_bin_start[];
 extern u8 _binary_forkdemo64_bin_end[];
 extern u8 _binary_child64_bin_start[];
 extern u8 _binary_child64_bin_end[];
+extern u8 _binary_m17demo_bin_start[];
+extern u8 _binary_m17demo_bin_end[];
 
 static struct proc procs[MAX_PROCS];
 static struct proc *current;
@@ -78,6 +81,11 @@ static int kernel_armed;
 static int preempt_noted;
 static int slice;
 static int rr;
+/* shell_poll_mode: background pump. Return to the shell instead of hlt
+ * when the only user tasks are sleeping, and yield after one quantum.
+ * focus_pid: foreground wait. 0 = none, 0xffffffff = any shell child. */
+static int shell_poll_mode;
+static u32 focus_pid;
 
 #define COM1 0x3F8
 static inline void outb(u16 port, u8 val)
@@ -330,6 +338,21 @@ static int any_sleeping(void)
 
 static void proc64_dispatch_next(void) __attribute__((noreturn));
 
+/* 1 when a foreground shell wait should resume (target zombie or gone). */
+static int focus_done(void)
+{
+    int i, saw = 0;
+    if (!focus_pid) return 0;
+    for (i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = &procs[i];
+        if (p->state == ST_FREE || p->ppid != 0) continue;
+        if (focus_pid != 0xffffffffu && p->pid != focus_pid) continue;
+        saw = 1;
+        if (p->state == ST_ZOMBIE) return 1;
+    }
+    return saw ? 0 : 1;
+}
+
 static void proc64_dispatch_next(void)
 {
     for (;;) {
@@ -337,6 +360,11 @@ static void proc64_dispatch_next(void)
         __asm__ volatile("cli" ::: "memory");
         wake_sleepers();
         complete_waits();
+        if (focus_done()) {
+            current = 0;
+            if (kernel_armed)
+                proc_restore_kernel();
+        }
         n = pick_next(0, 1);
         if (n) {
             current = n;
@@ -344,6 +372,10 @@ static void proc64_dispatch_next(void)
             proc64_iret_user(&n->ctx);
         }
         current = 0;
+        /* Background pump must not sleep inside the scheduler: the shell
+         * still has to poll the NIC. A foreground wait stays here. */
+        if (shell_poll_mode && kernel_armed)
+            proc_restore_kernel();
         if (!any_sleeping()) {
             if (kernel_armed)
                 proc_restore_kernel();
@@ -410,6 +442,12 @@ void proc64_on_timer(u64 *fr)
     slice = 0;
     wake_sleepers();
     complete_waits();
+    /* Hand the CPU back to the shell after one quantum of a background job. */
+    if (shell_poll_mode && kernel_armed) {
+        ctx_from_frame(current, fr);
+        current = 0;
+        proc_restore_kernel();
+    }
     {
         struct proc *n = pick_next(current, 0);
         if (!n || n == current) return;
@@ -517,6 +555,123 @@ static void sys_exit(u64 code)
     proc64_dispatch_next();
 }
 
+static const char *state_name(int st)
+{
+    if (st == ST_RUN) return "RUN";
+    if (st == ST_SLEEP) return "SLEEP";
+    if (st == ST_WAIT) return "WAIT";
+    if (st == ST_ZOMBIE) return "ZOMBIE";
+    return "?";
+}
+
+void proc64_ps(void)
+{
+    int i, live = 0;
+    for (i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = &procs[i];
+        if (p->state == ST_FREE) continue;
+        if (p->state == ST_RUN || p->state == ST_SLEEP || p->state == ST_WAIT)
+            live = 1;
+        ser_puts(" ps: pid ");
+        ser_put_dec(p->pid);
+        ser_puts(" ppid ");
+        ser_put_dec(p->ppid);
+        ser_puts(" ");
+        ser_puts(state_name(p->state));
+        if (p->background) ser_puts(" bg");
+        ser_puts(" ");
+        ser_puts(p->name);
+        ser_puts("\n");
+    }
+    if (!live) ser_puts(" ps: (no live processes)\n");
+    else ser_puts(" PS-OK-17\n");
+}
+
+int proc64_kill(u32 pid)
+{
+    struct proc *p = proc_by_pid(pid);
+    if (!pid || !p || p->state == ST_ZOMBIE) return -1;
+    p->exit_code = 9;
+    p->state = ST_ZOMBIE;
+    if (current == p) current = 0;
+    return 0;
+}
+
+/* Reap a shell child (ppid 0). pid 0 means any. Returns the pid or -1. */
+static int reap_ppid0(u32 pid, u32 *code)
+{
+    int i;
+    for (i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = &procs[i];
+        u32 id;
+        if (p->state != ST_ZOMBIE || p->ppid != 0) continue;
+        if (pid && p->pid != pid) continue;
+        id = p->pid;
+        if (code) *code = p->exit_code;
+        proc_release(p);
+        return (int)id;
+    }
+    return -1;
+}
+
+static int shell_has_ppid0(u32 pid)
+{
+    int i;
+    for (i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == ST_FREE || procs[i].ppid != 0) continue;
+        if (pid && procs[i].pid != pid) continue;
+        return 1;
+    }
+    return 0;
+}
+
+int proc64_shell_wait(u32 pid, u32 *code)
+{
+    for (;;) {
+        int id = reap_ppid0(pid, code);
+        if (id >= 0) return id;
+        if (!shell_has_ppid0(pid)) return -1;
+        focus_pid = pid ? pid : 0xffffffffu;
+        shell_poll_mode = 0;
+        kernel_armed = 1;
+        if (proc_save_kernel() == 0)
+            proc64_dispatch_next();
+        kernel_armed = 0;
+        focus_pid = 0;
+        __asm__ volatile("sti" ::: "memory");
+    }
+}
+
+int proc64_spawn(const u8 *img, u32 size, const char *name, int bg)
+{
+    struct proc *p;
+    u32 code = 0;
+    int id;
+    if (!img || !size || size > PAGE) return -1;
+    p = spawn_image(name ? name : "proc", img, size, 0);
+    if (!p) return -1;
+    p->background = bg ? 1 : 0;
+    if (bg) return (int)p->pid;
+    id = proc64_shell_wait(p->pid, &code);
+    if (id < 0) return -1;
+    return (int)code;
+}
+
+void proc64_shell_poll(void)
+{
+    wake_sleepers();
+    if (!pick_next(0, 1)) return;
+    shell_poll_mode = 1;
+    focus_pid = 0;
+    kernel_armed = 1;
+    slice = QUANTUM - 1;         /* yield on the next timer tick */
+    if (proc_save_kernel() == 0)
+        proc64_dispatch_next();
+    kernel_armed = 0;
+    shell_poll_mode = 0;
+    __asm__ volatile("sti" ::: "memory");
+}
+
 static u64 sys_sleep(u64 ms)
 {
     u64 ticks;
@@ -574,6 +729,9 @@ u64 syscall_handler(u64 nr, u64 a1, u64 a2)
         return sys_execve();
     case 18:
         return sys_waitpid();
+    case 19:
+        proc64_ps();
+        return 0;
     default:
         return (u64)-1;
     }
@@ -610,4 +768,32 @@ void proc64_boot_test(void)
     }
     __asm__ volatile("sti" ::: "memory");
     ser_puts(" M16-RETURN-OK\n");
+}
+
+void proc64_m17_test(void)
+{
+    u32 size;
+    struct proc *p;
+    int i;
+
+    size = (u32)(_binary_m17demo_bin_end - _binary_m17demo_bin_start);
+    p = spawn_image("JOB17", _binary_m17demo_bin_start, size, 0);
+    if (!p) {
+        ser_puts(" M17: spawn failed\n");
+        return;
+    }
+    ser_puts(" M17: shell-job test (sleep, ps, wait)\n");
+    kernel_armed = 1;
+    shell_poll_mode = 0;
+    focus_pid = 0;
+    slice = 0;
+    if (proc_save_kernel() == 0)
+        proc64_dispatch_next();
+    kernel_armed = 0;
+    current = 0;
+    for (i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state != ST_FREE)
+            proc_release(&procs[i]);
+    }
+    __asm__ volatile("sti" ::: "memory");
 }
