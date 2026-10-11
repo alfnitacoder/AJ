@@ -407,7 +407,46 @@ void kernel_main64(void)
         ajlang64_run("HTTP.TXT");
         serial_puts(" AJLang-64: running WRITE.TXT (file_write to disk)\n");
         ajlang64_run("WRITE.TXT");
-        serial_puts(" exec: disk programs available via 'run FILE.UP' (auto-run parked: ATA hang)\n");
+        /* Data-cluster reads after the write above. VISITS.TXT is the
+         * file whose LBA was 81 in the hung trace. */
+        {
+            extern int fat64_read_file(const char *, void *, unsigned int);
+            extern int fat64_write_file(const char *, const void *, unsigned int);
+            static unsigned char big[3000];
+            static unsigned char back[3000];
+            static char small[64];
+            unsigned int i;
+            int ok = 1;
+            int n, w;
+            for (i = 0; i < sizeof(big); i++)
+                big[i] = (unsigned char)(0x41 + (i % 26));
+            w = fat64_write_file("BIG64.TXT", big, sizeof(big));
+            n = fat64_read_file("BIG64.TXT", back, sizeof(back));
+            if (w != (int)sizeof(big) || n != (int)sizeof(big)) ok = 0;
+            else {
+                for (i = 0; i < sizeof(big); i++)
+                    if (back[i] != big[i]) ok = 0;
+            }
+            w = fat64_write_file("BIG64.TXT", big, sizeof(big));
+            n = fat64_read_file("BIG64.TXT", back, sizeof(back));
+            if (w != (int)sizeof(big) || n != (int)sizeof(big)) ok = 0;
+            else {
+                for (i = 0; i < sizeof(big); i++)
+                    if (back[i] != big[i]) ok = 0;
+            }
+            n = fat64_read_file("COUNT.TXT", small, sizeof(small) - 1);
+            if (n < 16) ok = 0;
+            else {
+                const char *exp = "WRITE-BACK-OK-11";
+                for (i = 0; i < 16; i++)
+                    if (small[i] != exp[i]) ok = 0;
+            }
+            n = fat64_read_file("VISITS.TXT", small, sizeof(small) - 1);
+            if (n < 1 || small[0] != '0') ok = 0;
+            n = fat64_read_file("HELLO64.UP", small, sizeof(small) - 1);
+            if (n < 16) ok = 0;
+            serial_puts(ok ? " WRITE-THEN-READ-OK\n" : " WRITE-THEN-READ-FAIL\n");
+        }
     }
 
     /* ---- M12: web server (AJLang-driven, port 80) ---- */

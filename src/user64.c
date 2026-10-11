@@ -72,6 +72,10 @@ static u8  tss64[136] __attribute__((aligned(8)));
 static void lgdt_and_tr(void)
 {
     struct { u16 lim; u64 base; } __attribute__((packed)) idtr_gdtr;
+    /* ltr #GPs if the TSS descriptor is busy (type 0x8B). The first ltr
+     * sets that bit in memory; a later exec must clear it or the CPU
+     * triple-faults (the new GDTR no longer describes the fault handler). */
+    gdt_full[53] = (u8)(gdt_full[53] & ~0x02);
     idtr_gdtr.lim = gdt_lim;
     idtr_gdtr.base = (u64)gdt_full;
     __asm__ __volatile__("lgdt %0" : : "m"(idtr_gdtr));

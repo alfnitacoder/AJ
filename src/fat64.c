@@ -89,7 +89,10 @@ int fat64_init(void)
             f_type = (clusters >= 4085) ? 16 : 12;
         }
     }
-    fat_cache_bytes = (u32)f_nfats * f_spf * f_bps;
+    /* One FAT. The second copy is written from this image on flush.
+     * Caching both and then writing nfats*spf sectors at each copy's LBA
+     * spills the second write into the root directory. */
+    fat_cache_bytes = (u32)f_spf * f_bps;
     if (fat_cache_bytes > sizeof(fat_cache)) fat_cache_bytes = sizeof(fat_cache);
     ata64_read_lba(f_reserved, (u16)(fat_cache_bytes / f_bps), fat_cache);
     root_cache_bytes = (u32)f_root_secs * f_bps;
@@ -134,29 +137,61 @@ int fat64_init(void)
     return 0;
 }
 
-/* next cluster in the chain */
-static u32 next_cluster(u32 cl)
+/* FAT12 packs two 12-bit entries into 3 bytes. An even entry owns
+ * fat[off] and the low nibble of fat[off+1]; the odd entry owns the
+ * high nibble of fat[off] and all of fat[off+1]. */
+static u32 fat_get(u32 cl)
 {
     if (f_type == 12) {
         u32 off = cl + cl / 2;
         u16 v;
-        if (off + 1 >= fat_cache_bytes) return 0;
+        if (off + 1 >= fat_cache_bytes) return 0xFFF;
         if (cl & 1)
             v = (u16)(((u16)fat_cache[off] >> 4) | ((u16)fat_cache[off + 1] << 4));
         else
             v = (u16)(fat_cache[off] | ((u16)fat_cache[off + 1] << 8));
-        v &= 0xFFF;
-        if (v >= 0xFF8) return 0;
-        return v;
+        return (u32)(v & 0xFFF);
     }
     {
         u32 off = cl * 2;
-        u16 v;
-        if (off + 1 >= fat_cache_bytes) return 0;
-        v = rd16(fat_cache + off);
-        if (v >= 0xFFF8) return 0;
-        return v;
+        if (off + 1 >= fat_cache_bytes) return 0xFFFF;
+        return rd16(fat_cache + off);
     }
+}
+
+static void fat_set(u32 cl, u32 value)
+{
+    if (f_type == 12) {
+        u32 off = cl + cl / 2;
+        if (off + 1 >= fat_cache_bytes) return;
+        value &= 0xFFF;
+        if (cl & 1) {
+            fat_cache[off] = (u8)((fat_cache[off] & 0x0F) | ((value & 0x0F) << 4));
+            fat_cache[off + 1] = (u8)(value >> 4);
+        } else {
+            fat_cache[off] = (u8)(value & 0xFF);
+            fat_cache[off + 1] = (u8)((fat_cache[off + 1] & 0xF0) |
+                                      ((value >> 8) & 0x0F));
+        }
+    } else {
+        u32 off = cl * 2;
+        if (off + 1 >= fat_cache_bytes) return;
+        fat_cache[off] = (u8)(value & 0xFF);
+        fat_cache[off + 1] = (u8)((value >> 8) & 0xFF);
+    }
+}
+
+static int fat_is_eoc(u32 v)
+{
+    return f_type == 12 ? (v >= 0xFF8) : (v >= 0xFFF8);
+}
+
+/* next cluster in the chain */
+static u32 next_cluster(u32 cl)
+{
+    u32 v = fat_get(cl);
+    if (v < 2 || fat_is_eoc(v)) return 0;
+    return v;
 }
 
 static int name_eq83(const u8 *entry, const char *name)
@@ -306,46 +341,24 @@ static int name_to83(const char *name, u8 *out)
 static void fat_flush(void)
 {
     u16 f;
-    u32 bytes = (u32)f_nfats * f_spf * f_bps;
-    if (bytes > fat_cache_bytes) bytes = fat_cache_bytes;
+    u16 secs = (u16)(fat_cache_bytes / f_bps);
     for (f = 0; f < f_nfats; f++)
-        ata64_write_lba((u32)f_reserved + f * f_spf,
-                        (u16)(bytes / f_bps), fat_cache);
+        ata64_write_lba((u32)f_reserved + f * f_spf, secs, fat_cache);
 }
 
 static u32 fat_alloc_cluster(void)
 {
     u32 cl;
+    u32 eoc = (f_type == 12) ? 0xFFFu : 0xFFFFu;
     for (cl = 2; ; cl++) {
-        u32 off;
-        u16 v;
         if (f_type == 12) {
-            off = cl + cl / 2;
-            if (off + 1 >= fat_cache_bytes) return 0;
-            if (cl & 1)
-                v = (u16)(((u16)fat_cache[off] >> 4) | ((u16)fat_cache[off + 1] << 4));
-            else
-                v = (u16)(fat_cache[off] | ((u16)fat_cache[off + 1] << 8));
-            v &= 0xFFF;
-            if (v != 0) continue;
-            /* set EOC 0xFFF, preserving the packed neighbour nibbles */
-            if (cl & 1) {
-                fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | 0xF0;
-                fat_cache[off + 1] |= 0x0F;
-            } else {
-                fat_cache[off] |= 0x0F;
-                fat_cache[off + 1] = (u8)(fat_cache[off + 1] & 0xF0) | 0x0F;
-            }
-            return cl;
-        } else {
-            off = cl * 2;
-            if (off + 1 >= fat_cache_bytes) return 0;
-            v = rd16(fat_cache + off);
-            if (v != 0) continue;
-            fat_cache[off] = 0xF8;
-            fat_cache[off + 1] = 0xFF;
-            return cl;
+            if (cl + cl / 2 + 1 >= fat_cache_bytes) return 0;
+        } else if (cl * 2 + 1 >= fat_cache_bytes) {
+            return 0;
         }
+        if (fat_get(cl) != 0) continue;
+        fat_set(cl, eoc);
+        return cl;
     }
 }
 
@@ -353,22 +366,9 @@ static void fat_free_chain(u32 cl)
 {
     u32 guard = 0;
     while (cl >= 2 && guard++ < 65536) {
-        u32 next = next_cluster(cl);
-        if (f_type == 12) {
-            u32 off = cl + cl / 2;
-            if (cl & 1) {
-                fat_cache[off] &= 0x0F;
-                fat_cache[off + 1] &= 0xF0;
-            } else {
-                fat_cache[off] &= 0xF0;
-                fat_cache[off + 1] &= 0x0F;
-            }
-        } else {
-            u32 off = cl * 2;
-            fat_cache[off] = 0;
-            fat_cache[off + 1] = 0;
-        }
-        if (next == 0) break;
+        u32 next = fat_get(cl);
+        fat_set(cl, 0);
+        if (next < 2 || fat_is_eoc(next)) break;
         cl = next;
     }
 }
@@ -427,24 +427,8 @@ int fat64_write_file(const char *name, const void *data, u32 len)
         cluster = fat_alloc_cluster();
         if (!cluster) { fat_flush(); return -7; }
         if (!first) first = cluster;
-        if (prev) {
-            /* link prev -> cluster in the FAT */
-            if (f_type == 12) {
-                u32 off = prev + prev / 2;
-                if (prev & 1) {
-                    fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | ((u8)(cluster << 4));
-                    fat_cache[off + 1] = (u8)((cluster >> 4) & 0xFF);
-                } else {
-                    fat_cache[off] = (u8)(cluster & 0xFF);
-                    fat_cache[off + 1] = (u8)((fat_cache[off + 1] & 0xF0) |
-                                              ((cluster >> 8) & 0x0F));
-                }
-            } else {
-                u32 off = prev * 2;
-                fat_cache[off] = (u8)(cluster & 0xFF);
-                fat_cache[off + 1] = (u8)(cluster >> 8);
-            }
-        }
+        if (prev)
+            fat_set(prev, cluster);
         {
             u8 sec[4096];
             u32 lba = f_data_lba + (cluster - 2) * f_spc;
@@ -466,21 +450,7 @@ int fat64_write_file(const char *name, const void *data, u32 len)
     if (!first) {                          /* empty file: still needs 1 cl? no */
         first = 0;
     } else {
-        /* mark the last cluster EOC */
-        if (f_type == 12) {
-            u32 off = prev + prev / 2;
-            if (prev & 1) {
-                fat_cache[off] = (u8)(fat_cache[off] & 0x0F) | 0xF0;
-                fat_cache[off + 1] |= 0x0F;
-            } else {
-                fat_cache[off] |= 0x0F;
-                fat_cache[off + 1] = (u8)(fat_cache[off + 1] & 0xF0) | 0x0F;
-            }
-        } else {
-            u32 off = prev * 2;
-            fat_cache[off] = 0xFF;
-            fat_cache[off + 1] = 0xFF;
-        }
+        fat_set(prev, (f_type == 12) ? 0xFFFu : 0xFFFFu);
     }
 
     ent[26] = (u8)(first & 0xFF);
